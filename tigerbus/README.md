@@ -1,50 +1,37 @@
-# Welcome to your Expo app 👋
+# TigerBus
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A mobile app for navigating LSU bus routes, built with React Native and Expo.
 
-## Get started
+## Prerequisites
 
-1. Install dependencies
+- [Node.js](https://nodejs.org/) installed on your machine
+- [Expo Go](https://expo.dev/go) installed on your phone
+  - [iOS – App Store](https://apps.apple.com/app/expo-go/id982107779)
+  - [Android – Google Play](https://play.google.com/store/apps/details?id=host.exp.exponent)
+
+## Running the App
+
+1. **Install dependencies**
 
    ```bash
    npm install
    ```
 
-2. Start the app
+2. **Start the development server**
 
    ```bash
    npx expo start
    ```
 
-In the output, you'll find options to open the app in a
+3. **Open on your phone**
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+   - A QR code will appear in the terminal
+   - **iOS:** Open the Camera app and scan the QR code
+   - **Android:** Open the Expo Go app and tap "Scan QR code", then scan it
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+   The app will load on your phone through Expo Go.
 
-## Get a fresh project
+## Notes
 
-When you're ready, run:
-
-```bash
-npm run reset-project
-```
-
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- Your phone and computer must be on the same Wi-Fi network
+- If the QR code scan doesn't connect, try pressing `s` in the terminal to switch to Expo Go tunnel mode
