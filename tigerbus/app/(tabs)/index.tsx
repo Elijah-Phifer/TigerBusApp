@@ -48,6 +48,8 @@ import {
   setBackgroundUserId,
 } from '../../utils/checkinService';
 import ActionSheet from '../ActionSheet';
+
+
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const PANEL_HEIGHT = SCREEN_HEIGHT * 0.5;
 const COLLAPSED_HEIGHT = 110;
@@ -235,7 +237,6 @@ useEffect(() => {
   // ─── Real-time posts listener ─────────────────
   useEffect(() => {
     const unsubscribe = onPostsSnapshot((posts) => {
-      console.log('[onPostsSnapshot] received', posts.length, 'posts');
       setDbPosts(posts);
     });
     return () => unsubscribe();
@@ -438,15 +439,21 @@ useEffect(() => {
       .sort((a, b) => b.count - a.count);
   };
 
+  
   if (!region) return null;
 
   // Compute which routes to display: all routes in any option when in nav mode, else all/none
   const displayRoutes = (() => {
+    if (selectedOption) {
+      return BUS_ROUTES.filter((r) => 
+        selectedOption.routes.some((sr) => sr.id === r.id)
+      );
+    }
     if (navDestination && routeOptions.length > 0) {
       const allOptionRouteIds = new Set(routeOptions.flatMap((o) => o.routes.map((r) => r.id)));
       return BUS_ROUTES.filter((r) => allOptionRouteIds.has(r.id));
     }
-    if (navDestination) return []; // destination set but no options found
+    if (navDestination) return [];
     return showAllRoutes ? BUS_ROUTES : [];
   })();
 
@@ -495,9 +502,11 @@ useEffect(() => {
           }
         }}
       >
-        {displayRoutes.map((route) => {
+
+        {displayRoutes.flatMap((route) => {
           const hasSelection = selectedOption !== null;
           const isInOption = selectedOptionRouteIds.has(route.id);
+
           return route.segments.map((segment, segIdx) => (
             <Polyline
               key={`${route.id}-${segIdx}`}
@@ -540,21 +549,21 @@ useEffect(() => {
 
         {/* Walking paths: origin → board stop, alight stop → destination */}
         {walkingPaths && (
-          <>
-            <Polyline
-              coordinates={walkingPaths.toBoard}
-              strokeColor="#1565C0"
-              strokeWidth={3}
-              lineDashPattern={[10, 6]}
-            />
-            <Polyline
-              coordinates={walkingPaths.fromAlight}
-              strokeColor="#1565C0"
-              strokeWidth={3}
-              lineDashPattern={[10, 6]}
-            />
-          </>
-        )}
+            <>
+              <Polyline
+                coordinates={walkingPaths.toBoard}
+                strokeColor="#1565C0"
+                strokeWidth={5}
+                lineDashPattern={[12, 4]}
+              />
+              <Polyline
+                coordinates={walkingPaths.fromAlight}
+                strokeColor="#1565C0"
+                strokeWidth={5}
+                lineDashPattern={[12, 4]}
+              />
+            </>
+          )}
       </MapView>
 
       {/* Center pin for pin drop mode */}

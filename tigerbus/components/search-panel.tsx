@@ -27,6 +27,7 @@ import { useRouter } from 'expo-router';
 import { useAuth } from '../context/AuthContext';
 import { RouteOption } from '../utils/tripPlanner';
 import { haversineMeters } from '../utils/routeMatching';
+import { BUS_STOPS } from '../app/busStops';
 
 export type NavPlace = {
   name: string;
@@ -58,28 +59,17 @@ type SearchPanelProps = {
 const getInitials = (name: string) =>
   name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 
-async function fetchPlaces(query: string): Promise<NavPlace[]> {
+function fetchPlaces(query: string): NavPlace[] {
   if (query.trim().length < 2) return [];
-  // Always append "Louisiana" so Nominatim biases toward the state.
-  // Nominatim is case-insensitive by default, so user input casing doesn't matter.
-  const q = encodeURIComponent(query.trim() + ' Louisiana');
-  // bounded=1 restricts results to Louisiana's bounding box.
-  const url =
-    `https://nominatim.openstreetmap.org/search` +
-    `?format=json&q=${q}&limit=6&countrycodes=us` +
-    `&viewbox=-94.1,33.1,-88.7,28.9&bounded=1`;
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'TigerBusApp/1.0 (lsu-bus-navigation)',
-      'Accept-Language': 'en',
-    },
-  });
-  const data: any[] = await res.json();
-  return data.map((item) => ({
-    name: item.display_name.split(',').slice(0, 3).join(',').trim(),
-    latitude: parseFloat(item.lat),
-    longitude: parseFloat(item.lon),
-  }));
+  const q = query.trim().toLowerCase();
+  return BUS_STOPS
+    .filter((stop) => stop.name.toLowerCase().includes(q))
+    .slice(0, 6)
+    .map((stop) => ({
+      name: stop.name,
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+    }));
 }
 
 export default function SearchPanel({
@@ -110,6 +100,7 @@ export default function SearchPanel({
   const [fromText, setFromText] = useState('');
   const [geoResults, setGeoResults] = useState<NavPlace[]>([]);
   const [isLoadingGeo, setIsLoadingGeo] = useState(false);
+  const [navStarted, setNavStarted] = useState(false);
 
   // Arrival time picker
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
@@ -182,19 +173,11 @@ export default function SearchPanel({
 
   // ─── Geocoding helpers ──────────────────────────
   const triggerGeoSearch = (text: string) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (text.trim().length < 2) { setGeoResults([]); return; }
-    debounceRef.current = setTimeout(async () => {
-      setIsLoadingGeo(true);
-      try {
-        const results = await fetchPlaces(text);
-        setGeoResults(results);
-      } catch {
-        setGeoResults([]);
-      }
-      setIsLoadingGeo(false);
-    }, 400);
-  };
+  if (debounceRef.current) clearTimeout(debounceRef.current);
+  if (text.trim().length < 2) { setGeoResults([]); return; }
+  const results = fetchPlaces(text);
+  setGeoResults(results);
+};
 
   const handleToTextChange = (text: string) => {
     setToText(text);
@@ -454,13 +437,16 @@ export default function SearchPanel({
           <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(null)}>
             <View style={styles.pickerCard} onStartShouldSetResponder={() => true}>
               <Text style={styles.pickerTitle}>Select date</Text>
+              <View style={{ backgroundColor: '#f5f5f5', borderRadius: 12 }}>
               <DateTimePicker
                 value={pendingDate}
                 mode="date"
-                display={Platform.OS === 'ios' ? 'inline' : 'calendar'}
+                display="inline"
+                themeVariant="light"
                 minimumDate={new Date()}
                 onChange={(_, d) => d && setPendingDate(d)}
-              />
+                />
+            </View>
               <Pressable
                 style={styles.pickerNext}
                 onPress={() => setShowPicker('time')}
@@ -476,12 +462,15 @@ export default function SearchPanel({
           <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(null)}>
             <View style={styles.pickerCard} onStartShouldSetResponder={() => true}>
               <Text style={styles.pickerTitle}>Select time</Text>
+              <View style={{ backgroundColor: '#f5f5f5', borderRadius: 12 }}>
               <DateTimePicker
                 value={pendingDate}
                 mode="time"
                 display={Platform.OS === 'ios' ? 'spinner' : 'clock'}
+                themeVariant="light"
                 onChange={(_, d) => d && setPendingDate(d)}
               />
+            </View>
               <Pressable
                 style={styles.pickerNext}
                 onPress={() => {
@@ -620,7 +609,17 @@ export default function SearchPanel({
                             </Text>
                           </View>
                         )}
-                        {isSelected && <Text style={styles.optionShowingTag}>Showing</Text>}
+                        {isSelected && (
+                            <>
+                            <Text style={styles.optionShowingTag}>Showing</Text>
+                            <Pressable
+                              style={styles.letsGoBtn}
+                              onPress={() => setNavStarted(true)}
+                            >
+                              <Text style={styles.letsGoBtnText}>Let's Go →</Text>
+                            </Pressable>
+                          </>
+                        )}
                       </View>
                     </Pressable>
                   );
@@ -671,6 +670,79 @@ export default function SearchPanel({
           </Pressable>
         </View>
       </Animated.View>
+      {navStarted && selectedOption && (
+  <Modal transparent animationType="slide">
+    <View style={styles.navModalBackdrop}>
+      <View style={styles.navModal}>
+        <Text style={styles.navModalTitle}>Your Trip</Text>
+
+        <View style={styles.navStep}>
+          <Text style={styles.navStepIcon}>🚶</Text>
+          <Text style={styles.navStepText}>
+            Walk {Math.ceil(selectedOption.walkToBoard / 80)} min to{' '}
+            <Text style={styles.navStepBold}>{selectedOption.boardStop.name}</Text>
+          </Text>
+        </View>
+
+        <View style={styles.navDivider} />
+
+        <View style={styles.navStep}>
+          <Text style={styles.navStepIcon}>🚌</Text>
+          <Text style={styles.navStepText}>
+            Board{' '}
+            <Text style={styles.navStepBold}>{selectedOption.routes[0].name}</Text>
+            {selectedOption.nextBusSeconds !== undefined && (
+              <Text style={styles.navStepMuted}>
+                {' '}(next bus in {Math.ceil(selectedOption.nextBusSeconds / 60)} min)
+              </Text>
+            )}
+          </Text>
+        </View>
+
+        <View style={styles.navDivider} />
+
+        {selectedOption.type === 'transfer' && selectedOption.transferStop && (
+          <>
+            <View style={styles.navStep}>
+              <Text style={styles.navStepIcon}>🔄</Text>
+              <Text style={styles.navStepText}>
+                Transfer at{' '}
+                <Text style={styles.navStepBold}>{selectedOption.transferStop.name}</Text>
+                {' '}to{' '}
+                <Text style={styles.navStepBold}>{selectedOption.routes[1].name}</Text>
+              </Text>
+            </View>
+            <View style={styles.navDivider} />
+          </>
+        )}
+
+        <View style={styles.navStep}>
+          <Text style={styles.navStepIcon}>📍</Text>
+          <Text style={styles.navStepText}>
+            Get off at{' '}
+            <Text style={styles.navStepBold}>{selectedOption.alightStop.name}</Text>
+          </Text>
+        </View>
+
+        <View style={styles.navDivider} />
+
+        <View style={styles.navStep}>
+          <Text style={styles.navStepIcon}>🚶</Text>
+          <Text style={styles.navStepText}>
+            Walk {Math.ceil(selectedOption.walkFromAlight / 80)} min to your destination
+          </Text>
+        </View>
+
+        <Pressable
+          style={styles.navCloseBtn}
+          onPress={() => setNavStarted(false)}
+        >
+          <Text style={styles.navCloseBtnText}>Close</Text>
+        </Pressable>
+      </View>
+    </View>
+  </Modal>
+)}
     </Animated.View>
   );
 }
@@ -973,16 +1045,18 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   pickerCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 20,
-    width: '100%',
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
-  },
+  backgroundColor: '#fff',
+  borderRadius: 20,
+  padding: 20,
+  width: '100%',
+  shadowColor: '#000',
+  shadowOpacity: 0.2,
+  shadowRadius: 12,
+  shadowOffset: { width: 0, height: 4 },
+  elevation: 8,
+  // Add this:
+  minHeight: 200,
+},
   pickerTitle: {
     fontSize: 16,
     fontWeight: '700',
@@ -1119,4 +1193,75 @@ const styles = StyleSheet.create({
   routesBtnTextActive: {
     color: '#fff',
   },
+  letsGoBtn: {
+  backgroundColor: '#1565C0',
+  borderRadius: 10,
+  paddingHorizontal: 10,
+  paddingVertical: 6,
+  marginTop: 4,
+  alignItems: 'center',
+},
+letsGoBtnText: {
+  color: '#fff',
+  fontSize: 12,
+  fontWeight: '700',
+},
+navModalBackdrop: {
+  flex: 1,
+  backgroundColor: 'rgba(0,0,0,0.5)',
+  justifyContent: 'flex-end',
+},
+navModal: {
+  backgroundColor: '#fff',
+  borderTopLeftRadius: 24,
+  borderTopRightRadius: 24,
+  padding: 24,
+  paddingBottom: 40,
+},
+navModalTitle: {
+  fontSize: 20,
+  fontWeight: '800',
+  color: '#111',
+  marginBottom: 20,
+},
+navStep: {
+  flexDirection: 'row',
+  alignItems: 'flex-start',
+  gap: 12,
+  paddingVertical: 12,
+},
+navStepIcon: {
+  fontSize: 22,
+},
+navStepText: {
+  flex: 1,
+  fontSize: 15,
+  color: '#333',
+  lineHeight: 22,
+},
+navStepBold: {
+  fontWeight: '700',
+  color: '#111',
+},
+navStepMuted: {
+  color: '#888',
+  fontWeight: '400',
+},
+navDivider: {
+  height: 1,
+  backgroundColor: '#f0f0f0',
+  marginLeft: 34,
+},
+navCloseBtn: {
+  marginTop: 20,
+  backgroundColor: '#f0f0f0',
+  borderRadius: 14,
+  paddingVertical: 14,
+  alignItems: 'center',
+},
+navCloseBtnText: {
+  fontSize: 16,
+  fontWeight: '700',
+  color: '#333',
+},
 });
