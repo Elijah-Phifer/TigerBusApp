@@ -11,19 +11,25 @@ A mobile app for navigating LSU bus routes, built with React Native and Expo.
 
 ## Running the App
 
-1. **Install dependencies**
+1. **Navigate to the app directory**
+
+   ```bash
+   cd tigerbus
+   ```
+
+2. **Install dependencies**
 
    ```bash
    npm install
    ```
 
-2. **Start the development server**
+3. **Start the development server**
 
    ```bash
    npx expo start
    ```
 
-3. **Open on your phone**
+4. **Open on your phone**
 
    - A QR code will appear in the terminal
    - **iOS:** Open the Camera app and scan the QR code
