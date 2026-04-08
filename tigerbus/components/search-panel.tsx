@@ -1,0 +1,1122 @@
+/**
+ * SearchPanel — components/search-panel.tsx
+ *
+ * Navigation-first bottom drawer for the LSU TigerBus app.
+ *
+ * Collapsed: shows "Where do you wanna go?" bar (or active trip summary)
+ * Expanded:  shows From/To inputs with Nominatim geocoding, then matched routes
+ */
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  Pressable,
+  ScrollView,
+  Animated,
+  PanResponder,
+  Keyboard,
+  KeyboardEvent,
+  StyleSheet,
+  ActivityIndicator,
+  Platform,
+  Modal,
+} from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { useRouter } from 'expo-router';
+import { useAuth } from '../context/AuthContext';
+import { RouteOption } from '../utils/tripPlanner';
+import { haversineMeters } from '../utils/routeMatching';
+
+export type NavPlace = {
+  name: string;
+  latitude: number;
+  longitude: number;
+};
+
+type SearchPanelProps = {
+  isOpen: boolean;
+  slideAnim: Animated.Value;
+  panelHeight: number;
+  collapsedHeight: number;
+  onOpen: () => void;
+  onClose: () => void;
+  showAllRoutes: boolean;
+  onToggleAllRoutes: () => void;
+  navDestination: NavPlace | null;
+  navOrigin: NavPlace | null;        // null = use device GPS
+  userCoords: { latitude: number; longitude: number } | null;
+  onSetDestination: (place: NavPlace | null) => void;
+  onSetOrigin: (place: NavPlace | null) => void;
+  routeOptions: RouteOption[];       // computed trip options (direct + transfers)
+  selectedOption: RouteOption | null;
+  onSelectOption: (opt: RouteOption) => void; // toggle: tapping same option deselects
+  routesLoading: boolean;            // true while fetching active routes
+  onArrivalTimeChange: (time: Date | null) => void;
+};
+
+const getInitials = (name: string) =>
+  name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
+
+async function fetchPlaces(query: string): Promise<NavPlace[]> {
+  if (query.trim().length < 2) return [];
+  // Always append "Louisiana" so Nominatim biases toward the state.
+  // Nominatim is case-insensitive by default, so user input casing doesn't matter.
+  const q = encodeURIComponent(query.trim() + ' Louisiana');
+  // bounded=1 restricts results to Louisiana's bounding box.
+  const url =
+    `https://nominatim.openstreetmap.org/search` +
+    `?format=json&q=${q}&limit=6&countrycodes=us` +
+    `&viewbox=-94.1,33.1,-88.7,28.9&bounded=1`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'TigerBusApp/1.0 (lsu-bus-navigation)',
+      'Accept-Language': 'en',
+    },
+  });
+  const data: any[] = await res.json();
+  return data.map((item) => ({
+    name: item.display_name.split(',').slice(0, 3).join(',').trim(),
+    latitude: parseFloat(item.lat),
+    longitude: parseFloat(item.lon),
+  }));
+}
+
+export default function SearchPanel({
+  isOpen,
+  slideAnim,
+  panelHeight,
+  collapsedHeight,
+  onOpen,
+  onClose,
+  showAllRoutes,
+  onToggleAllRoutes,
+  navDestination,
+  navOrigin,
+  onSetDestination,
+  onSetOrigin,
+  routeOptions,
+  selectedOption,
+  onSelectOption,
+  routesLoading,
+  onArrivalTimeChange,
+}: SearchPanelProps) {
+  const router = useRouter();
+  const { user } = useAuth();
+
+  // Which input field is being edited right now
+  const [editingField, setEditingField] = useState<'from' | 'to' | null>(null);
+  const [toText, setToText] = useState('');
+  const [fromText, setFromText] = useState('');
+  const [geoResults, setGeoResults] = useState<NavPlace[]>([]);
+  const [isLoadingGeo, setIsLoadingGeo] = useState(false);
+
+  // Arrival time picker
+  const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
+  const [showPicker, setShowPicker] = useState<'date' | 'time' | null>(null);
+  const [pendingDate, setPendingDate] = useState<Date>(new Date());
+
+  const handleArrivalTimeChange = (selected: Date | null) => {
+    setArrivalTime(selected);
+    onArrivalTimeChange(selected);
+  };
+
+  const formatArrivalTime = (d: Date) => {
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    const isTomorrow = d.toDateString() === tomorrow.toDateString();
+    const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (isToday) return `Today ${timeStr}`;
+    if (isTomorrow) return `Tomorrow ${timeStr}`;
+    return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${timeStr}`;
+  };
+
+  /** Estimate bus ride time in minutes between two stops using haversine + winding factor */
+  const estimateBusMins = (opt: RouteOption): number => {
+    const dist = haversineMeters(opt.boardStop, opt.alightStop);
+    // 20 km/h average bus speed = 333 m/min; 1.5x for route winding
+    return Math.ceil((dist * 1.5) / 333);
+  };
+
+  /** Compute "leave by" time given a desired arrival time */
+  const computeLeaveBy = (opt: RouteOption, arrival: Date): Date => {
+    const totalMins =
+      Math.ceil(opt.walkToBoard / 80) +
+      estimateBusMins(opt) +
+      Math.ceil(opt.walkFromAlight / 80);
+    return new Date(arrival.getTime() - totalMins * 60 * 1000);
+  };
+
+  const formatTime = (d: Date) =>
+    d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  const toInputRef = useRef<TextInput | null>(null);
+  const fromInputRef = useRef<TextInput | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sync local text when parent nav state changes
+  useEffect(() => {
+    setToText(navDestination?.name ?? '');
+  }, [navDestination]);
+
+  useEffect(() => {
+    setFromText(navOrigin?.name ?? '');
+  }, [navOrigin]);
+
+  // Auto-focus 'To' input when panel opens in nav-input mode
+  useEffect(() => {
+    if (isOpen && editingField === 'to') {
+      const t = setTimeout(() => toInputRef.current?.focus(), 150);
+      return () => clearTimeout(t);
+    }
+  }, [isOpen, editingField]);
+
+  useEffect(() => {
+    if (isOpen && editingField === 'from') {
+      const t = setTimeout(() => fromInputRef.current?.focus(), 150);
+      return () => clearTimeout(t);
+    }
+  }, [isOpen, editingField]);
+
+  // ─── Geocoding helpers ──────────────────────────
+  const triggerGeoSearch = (text: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (text.trim().length < 2) { setGeoResults([]); return; }
+    debounceRef.current = setTimeout(async () => {
+      setIsLoadingGeo(true);
+      try {
+        const results = await fetchPlaces(text);
+        setGeoResults(results);
+      } catch {
+        setGeoResults([]);
+      }
+      setIsLoadingGeo(false);
+    }, 400);
+  };
+
+  const handleToTextChange = (text: string) => {
+    setToText(text);
+    if (navDestination) onSetDestination(null); // clear confirmed dest on edit
+    triggerGeoSearch(text);
+  };
+
+  const handleFromTextChange = (text: string) => {
+    setFromText(text);
+    if (navOrigin) onSetOrigin(null);
+    triggerGeoSearch(text);
+  };
+
+  const handleSelectPlace = (place: NavPlace) => {
+    setGeoResults([]);
+    Keyboard.dismiss();
+    if (editingField === 'to') {
+      setToText(place.name);
+      setEditingField(null);
+      onSetDestination(place);
+      onClose();
+    } else if (editingField === 'from') {
+      setFromText(place.name);
+      setEditingField(null);
+      onSetOrigin(place);
+      // If destination is already set keep panel open; otherwise close
+      if (!navDestination) setEditingField('to');
+    }
+  };
+
+  const handleClearTrip = () => {
+    setToText('');
+    setFromText('');
+    setGeoResults([]);
+    setEditingField(null);
+    onSetDestination(null);
+    onSetOrigin(null);
+    Keyboard.dismiss();
+  };
+
+  // ─── Keyboard avoidance ─────────────────────────
+  // Lift the whole panel up by the keyboard height so inputs stay visible.
+  const panelBottom = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const onShow = (e: KeyboardEvent) => {
+      Animated.timing(panelBottom, {
+        toValue: e.endCoordinates.height,
+        duration: Platform.OS === 'ios' ? (e.duration ?? 250) : 200,
+        useNativeDriver: false,
+      }).start();
+    };
+    const onHide = (e: KeyboardEvent) => {
+      Animated.timing(panelBottom, {
+        toValue: 0,
+        duration: Platform.OS === 'ios' ? (e.duration ?? 250) : 200,
+        useNativeDriver: false,
+      }).start();
+    };
+
+    const showSub = Keyboard.addListener(showEvent, onShow);
+    const hideSub = Keyboard.addListener(hideEvent, onHide);
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, [panelBottom]);
+
+  // ─── PanResponder ───────────────────────────────
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const dragStartProgressRef = useRef(isOpen ? 1 : 0);
+  const travelDistance = panelHeight - collapsedHeight;
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dy) > 10 && Math.abs(gs.dy) > Math.abs(gs.dx),
+      onPanResponderGrant: () => {
+        slideAnim.stopAnimation((value: number) => {
+          dragStartProgressRef.current = value;
+        });
+      },
+      onPanResponderMove: (_, gs) => {
+        const next = dragStartProgressRef.current - gs.dy / travelDistance;
+        slideAnim.setValue(Math.max(0, Math.min(1, next)));
+      },
+      onPanResponderRelease: (_, gs) => {
+        slideAnim.stopAnimation((value: number) => {
+          if (gs.vy < -0.25 || value > 0.5) {
+            onOpenRef.current();
+          } else {
+            onCloseRef.current();
+          }
+        });
+      },
+    })
+  ).current;
+
+  // ─── Derived UI state ───────────────────────────
+  const hasTrip = !!navDestination;
+  const isEditing = editingField !== null;
+
+  // ─── Render ─────────────────────────────────────
+  return (
+    <Animated.View
+      {...panResponder.panHandlers}
+      style={[
+        styles.panel,
+        {
+          bottom: panelBottom,
+          height: slideAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [collapsedHeight, panelHeight],
+          }),
+          borderTopLeftRadius: slideAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [30, 24],
+          }),
+          borderTopRightRadius: slideAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [30, 24],
+          }),
+        },
+      ]}
+    >
+      {/* Drag handle */}
+      <Animated.View
+        style={[
+          styles.handle,
+          {
+            backgroundColor: slideAnim.interpolate({
+              inputRange: [0, 0.1, 1],
+              outputRange: ['#000', '#868686', '#ccc'],
+            }),
+          },
+        ]}
+      />
+
+      {/* ── Always-visible From / To card ── */}
+      <View style={styles.headerWrap}>
+        <View style={styles.fromToCard}>
+
+          {/* From row */}
+          <View style={styles.cardRow}>
+            <View style={[styles.navDot, styles.navDotFrom]} />
+            {editingField === 'from' ? (
+              <TextInput
+                ref={fromInputRef}
+                style={styles.cardInput}
+                value={fromText}
+                onChangeText={handleFromTextChange}
+                placeholder="From where?"
+                placeholderTextColor="#aaa"
+                returnKeyType="next"
+                onSubmitEditing={() => {
+                  setEditingField('to');
+                  setTimeout(() => toInputRef.current?.focus(), 50);
+                }}
+              />
+            ) : (
+              <Pressable
+                style={{ flex: 1 }}
+                onPress={() => {
+                  setFromText(navOrigin?.name ?? '');
+                  setGeoResults([]);
+                  setEditingField('from');
+                  onOpen();
+                }}
+              >
+                <Text style={[styles.cardLabel, !navOrigin && styles.cardLabelMuted]} numberOfLines={1}>
+                  {navOrigin?.name ?? 'Your Location'}
+                </Text>
+              </Pressable>
+            )}
+            {navOrigin && editingField !== 'from' && (
+              <Pressable onPress={() => { onSetOrigin(null); setFromText(''); }}>
+                <Text style={styles.rowClear}>✕</Text>
+              </Pressable>
+            )}
+            {hasTrip && editingField !== 'from' && !navOrigin && (
+              <Pressable style={styles.clearTripBtn} onPress={handleClearTrip}>
+                <Text style={styles.clearTripBtnText}>✕</Text>
+              </Pressable>
+            )}
+          </View>
+
+          {/* Connector between rows */}
+          <View style={styles.cardConnector}>
+            <View style={styles.connectorLine} />
+          </View>
+
+          {/* To row */}
+          <View style={styles.cardRow}>
+            <View style={[styles.navDot, styles.navDotTo]} />
+            <TextInput
+              ref={toInputRef}
+              style={styles.cardInput}
+              value={toText}
+              onChangeText={handleToTextChange}
+              placeholder="Where to?"
+              placeholderTextColor="#aaa"
+              returnKeyType="search"
+              onFocus={() => { setEditingField('to'); onOpen(); }}
+            />
+            {toText.length > 0 && (
+              <Pressable onPress={() => { setToText(''); setGeoResults([]); onSetDestination(null); }}>
+                <Text style={styles.rowClear}>✕</Text>
+              </Pressable>
+            )}
+          </View>
+
+        </View>
+      </View>
+
+      {/* ── Arrival time row (between from/to card and results) ── */}
+      <Animated.View
+        style={[
+          styles.arrivalRowWrap,
+          {
+            opacity: slideAnim.interpolate({
+              inputRange: [0, 0.3, 1],
+              outputRange: [0, 0, 1],
+            }),
+          },
+        ]}
+        pointerEvents={isOpen ? 'auto' : 'none'}
+      >
+        <View style={styles.arrivalRow}>
+          <Text style={styles.arrivalLabel}>Arrive by</Text>
+          <Pressable
+            style={[styles.arrivalPill, arrivalTime && styles.arrivalPillSet]}
+            onPress={() => {
+              setPendingDate(arrivalTime ?? new Date());
+              setShowPicker('date');
+            }}
+          >
+            <Text style={[styles.arrivalPillText, arrivalTime && styles.arrivalPillTextSet]}>
+              {arrivalTime ? formatArrivalTime(arrivalTime) : 'Set time'}
+            </Text>
+          </Pressable>
+          {arrivalTime && (
+            <Pressable onPress={() => handleArrivalTimeChange(null)}>
+              <Text style={styles.arrivalClear}>✕</Text>
+            </Pressable>
+          )}
+        </View>
+      </Animated.View>
+
+      {/* Date/time picker modals */}
+      {showPicker === 'date' && (
+        <Modal transparent animationType="fade">
+          <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(null)}>
+            <View style={styles.pickerCard} onStartShouldSetResponder={() => true}>
+              <Text style={styles.pickerTitle}>Select date</Text>
+              <DateTimePicker
+                value={pendingDate}
+                mode="date"
+                display={Platform.OS === 'ios' ? 'inline' : 'calendar'}
+                minimumDate={new Date()}
+                onChange={(_, d) => d && setPendingDate(d)}
+              />
+              <Pressable
+                style={styles.pickerNext}
+                onPress={() => setShowPicker('time')}
+              >
+                <Text style={styles.pickerNextText}>Next →</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Modal>
+      )}
+      {showPicker === 'time' && (
+        <Modal transparent animationType="fade">
+          <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(null)}>
+            <View style={styles.pickerCard} onStartShouldSetResponder={() => true}>
+              <Text style={styles.pickerTitle}>Select time</Text>
+              <DateTimePicker
+                value={pendingDate}
+                mode="time"
+                display={Platform.OS === 'ios' ? 'spinner' : 'clock'}
+                onChange={(_, d) => d && setPendingDate(d)}
+              />
+              <Pressable
+                style={styles.pickerNext}
+                onPress={() => {
+                  handleArrivalTimeChange(pendingDate);
+                  setShowPicker(null);
+                }}
+              >
+                <Text style={styles.pickerNextText}>Confirm</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Modal>
+      )}
+
+      {/* ── Expanded content ── */}
+      <Animated.View
+        style={[
+          styles.expandedContent,
+          {
+            opacity: slideAnim.interpolate({
+              inputRange: [0, 0.3, 1],
+              outputRange: [0, 0, 1],
+            }),
+          },
+        ]}
+        pointerEvents={isOpen ? 'auto' : 'none'}
+      >
+        <ScrollView
+          style={styles.resultsList}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {isLoadingGeo ? (
+            <ActivityIndicator color="#1565C0" style={{ marginTop: 20 }} />
+          ) : geoResults.length > 0 ? (
+            <>
+              <Text style={styles.sectionLabel}>Suggestions</Text>
+              {geoResults.map((place, i) => (
+                <Pressable
+                  key={i}
+                  style={styles.geoResultItem}
+                  onPress={() => handleSelectPlace(place)}
+                >
+                  <Text style={styles.geoResultIcon}>📍</Text>
+                  <Text style={styles.geoResultName} numberOfLines={2}>
+                    {place.name}
+                  </Text>
+                </Pressable>
+              ))}
+            </>
+          ) : hasTrip && !isEditing ? (
+            routesLoading ? (
+              <View style={styles.loadingWrap}>
+                <ActivityIndicator size="small" color="#1565C0" />
+                <Text style={styles.loadingText}>Finding active buses…</Text>
+              </View>
+            ) : routeOptions.length > 0 ? (
+              <>
+                <Text style={styles.sectionLabel}>
+                  {routeOptions.length} option{routeOptions.length !== 1 ? 's' : ''} found
+                  {arrivalTime ? ` · arrive by ${formatArrivalTime(arrivalTime)}` : ''}
+                </Text>
+                {routeOptions.map((opt) => {
+                  const isSelected = selectedOption?.id === opt.id;
+                  const leaveBy = arrivalTime ? computeLeaveBy(opt, arrivalTime) : null;
+                  return (
+                    <Pressable
+                      key={opt.id}
+                      style={[styles.optionCard, isSelected && styles.optionCardSelected]}
+                      onPress={() => onSelectOption(opt)}
+                    >
+                      {/* Route color bars */}
+                      <View style={styles.optionBars}>
+                        {opt.routes.map((r) => (
+                          <View key={r.id} style={[styles.optionColorBar, { backgroundColor: r.color }]} />
+                        ))}
+                      </View>
+
+                      {/* Option details */}
+                      <View style={styles.optionDetails}>
+                        {/* Walk-time summary instruction */}
+                        {opt.type === 'direct' ? (
+                          <Text style={styles.optionInstruction} numberOfLines={2}>
+                            Walk {Math.ceil(opt.walkToBoard / 80)}min → {opt.routes[0].name} → Walk {Math.ceil(opt.walkFromAlight / 80)}min
+                          </Text>
+                        ) : (
+                          <Text style={styles.optionInstruction} numberOfLines={2}>
+                            Walk {Math.ceil(opt.walkToBoard / 80)}min → {opt.routes[0].name} → {opt.routes[1].name} → Walk {Math.ceil(opt.walkFromAlight / 80)}min
+                          </Text>
+                        )}
+
+                        {/* Stop details */}
+                        {opt.type === 'direct' ? (
+                          <>
+                            <Text style={styles.optionStopLine} numberOfLines={1}>
+                              Board: {opt.boardStop.name}
+                            </Text>
+                            <Text style={styles.optionStopLine} numberOfLines={1}>
+                              Get off: {opt.alightStop.name}
+                            </Text>
+                          </>
+                        ) : (
+                          <>
+                            <Text style={styles.optionStopLine} numberOfLines={1}>
+                              Board: {opt.boardStop.name}
+                            </Text>
+                            <Text style={styles.optionTransferLine} numberOfLines={1}>
+                              Transfer at: {opt.transferStop?.name}
+                            </Text>
+                            <Text style={styles.optionStopLine} numberOfLines={1}>
+                              Get off: {opt.alightStop.name}
+                            </Text>
+                          </>
+                        )}
+                      </View>
+
+                      {/* Badges */}
+                      <View style={styles.optionBadgeWrap}>
+                        <View style={[styles.optionBadge, { backgroundColor: opt.type === 'direct' ? '#e8f5e9' : '#fff8e1' }]}>
+                          <Text style={[styles.optionBadgeText, { color: opt.type === 'direct' ? '#2e7d32' : '#f57f17' }]}>
+                            {opt.type === 'direct' ? 'Direct' : '1 Transfer'}
+                          </Text>
+                        </View>
+                        {leaveBy && (
+                          <View style={styles.leaveByBadge}>
+                            <Text style={styles.leaveByLabel}>Leave by</Text>
+                            <Text style={styles.leaveByTime}>{formatTime(leaveBy)}</Text>
+                          </View>
+                        )}
+                        {opt.nextBusSeconds !== undefined && !leaveBy && (
+                          <View style={styles.nextBusBadge}>
+                            <Text style={styles.nextBusBadgeText}>
+                              {opt.nextBusSeconds < 60
+                                ? `${opt.nextBusSeconds}s`
+                                : `${Math.ceil(opt.nextBusSeconds / 60)}min`}
+                            </Text>
+                          </View>
+                        )}
+                        {isSelected && <Text style={styles.optionShowingTag}>Showing</Text>}
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </>
+            ) : (
+              <View style={styles.noRoutesBox}>
+                <Text style={styles.noRoutesIcon}>🚌</Text>
+                <Text style={styles.noRoutesTitle}>No routes found</Text>
+                <Text style={styles.noRoutesSubtitle}>
+                  No Tiger Trails stop is close enough to both locations. Try a nearby street or landmark.
+                </Text>
+              </View>
+            )
+          ) : !isEditing ? (
+            <View style={styles.hintBox}>
+              <Text style={styles.hintIcon}>🐯</Text>
+              <Text style={styles.hintText}>
+                Type a destination to find which Tiger Trails routes can get you there.
+              </Text>
+            </View>
+          ) : null}
+        </ScrollView>
+
+        {/* Bottom bar: avatar + routes toggle */}
+        <View style={styles.bottomRow}>
+          <Pressable
+            style={styles.userPill}
+            onPress={() => router.push(user ? ('/profile' as any) : ('/login' as any))}
+          >
+            {user ? (
+              <View style={styles.initialsCircle}>
+                <Text style={styles.initialsText}>
+                  {getInitials(user.displayName || user.email || 'U')}
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.loginText}>Log In</Text>
+            )}
+          </Pressable>
+          <Pressable
+            style={[styles.routesBtnSm, showAllRoutes && styles.routesBtnActive]}
+            onPress={onToggleAllRoutes}
+          >
+            <Text style={[styles.routesBtnText, showAllRoutes && styles.routesBtnTextActive]}>
+              {showAllRoutes ? 'Hide Routes' : 'Show All Routes'}
+            </Text>
+          </Pressable>
+        </View>
+      </Animated.View>
+    </Animated.View>
+  );
+}
+
+const styles = StyleSheet.create({
+  panel: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    overflow: 'hidden',
+    zIndex: 20,
+    paddingTop: 10,
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 64,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#000',
+    marginBottom: 10,
+  },
+
+  // ── Header (always visible) ────────────────────
+  headerWrap: {
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+
+  // The single From/To card (replaces old search bar + trip card)
+  fromToCard: {
+    backgroundColor: '#f0f0f0',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  cardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  cardConnector: {
+    marginVertical: -2,
+  },
+  connectorLine: {
+    width: 2,
+    height: 10,
+    backgroundColor: '#ccc',
+    borderRadius: 1,
+    marginLeft: 4,
+  },
+  cardInput: {
+    flex: 1,
+    fontSize: 15,
+    color: '#111',
+    fontWeight: '600',
+    paddingVertical: 0,
+  },
+  cardLabel: {
+    fontSize: 14,
+    color: '#444',
+    fontWeight: '600',
+  },
+  cardLabelMuted: {
+    color: '#999',
+    fontWeight: '500',
+  },
+  rowClear: {
+    fontSize: 14,
+    color: '#bbb',
+    paddingHorizontal: 4,
+    fontWeight: '600',
+  },
+  clearTripBtn: {
+    padding: 4,
+  },
+  clearTripBtnText: {
+    fontSize: 14,
+    color: '#bbb',
+    fontWeight: '600',
+  },
+
+  // ── Nav dots ───────────────────────────────────
+  navDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 2,
+    flexShrink: 0,
+  },
+  navDotFrom: {
+    backgroundColor: '#4CAF50',
+    borderColor: '#388E3C',
+  },
+  navDotTo: {
+    backgroundColor: '#F44336',
+    borderColor: '#C62828',
+  },
+
+  // ── Expanded content ───────────────────────────
+  expandedContent: {
+    flex: 1,
+    paddingHorizontal: 14,
+  },
+
+  // ── Results list ───────────────────────────────
+  resultsList: {
+    flex: 1,
+  },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#999',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+    marginTop: 4,
+  },
+
+  // Geocoding results
+  geoResultItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  geoResultIcon: {
+    fontSize: 16,
+    marginTop: 1,
+  },
+  geoResultName: {
+    fontSize: 14,
+    color: '#222',
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+
+  // Route option cards
+  optionCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    marginBottom: 8,
+    borderRadius: 12,
+    backgroundColor: '#f8f8f8',
+    borderWidth: 1.5,
+    borderColor: '#ebebeb',
+  },
+  optionCardSelected: {
+    backgroundColor: '#f0f4ff',
+    borderColor: '#1565C0',
+  },
+  optionBars: {
+    flexDirection: 'column',
+    gap: 2,
+    paddingTop: 2,
+  },
+  optionColorBar: {
+    width: 5,
+    height: 28,
+    borderRadius: 3,
+  },
+  optionDetails: {
+    flex: 1,
+    gap: 2,
+  },
+  optionRouteName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#111',
+    textTransform: 'uppercase',
+    letterSpacing: 0.2,
+  },
+  optionStopLine: {
+    fontSize: 12,
+    color: '#555',
+    fontWeight: '500',
+  },
+  optionTransferLine: {
+    fontSize: 12,
+    color: '#f57f17',
+    fontWeight: '600',
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  optionBadgeWrap: {
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  optionBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  optionBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  optionShowingTag: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#1565C0',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  optionInstruction: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#111',
+    marginBottom: 4,
+    lineHeight: 17,
+  },
+  nextBusBadge: {
+    backgroundColor: '#E3F2FD',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginTop: 2,
+  },
+  nextBusBadgeText: {
+    fontSize: 10,
+    color: '#1565C0',
+    fontWeight: '700',
+  },
+  loadingWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 24,
+  },
+  loadingText: {
+    fontSize: 13,
+    color: '#888',
+    fontWeight: '500',
+  },
+
+  // ── Arrival time row ───────────────────────────
+  arrivalRowWrap: {
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+  },
+  arrivalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#f5f5f5',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  arrivalLabel: {
+    fontSize: 13,
+    color: '#666',
+    fontWeight: '600',
+  },
+  arrivalPill: {
+    flex: 1,
+    backgroundColor: '#e8e8e8',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  arrivalPillSet: {
+    backgroundColor: '#1565C0',
+  },
+  arrivalPillText: {
+    fontSize: 13,
+    color: '#555',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  arrivalPillTextSet: {
+    color: '#fff',
+  },
+  arrivalClear: {
+    fontSize: 14,
+    color: '#bbb',
+    fontWeight: '700',
+    paddingHorizontal: 4,
+  },
+
+  // ── Date/time picker modal ─────────────────────
+  pickerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  pickerCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 20,
+    width: '100%',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+  pickerTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  pickerNext: {
+    marginTop: 16,
+    backgroundColor: '#1565C0',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  pickerNextText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+
+  // ── Leave-by badge ─────────────────────────────
+  leaveByBadge: {
+    backgroundColor: '#FFF3E0',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  leaveByLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#E65100',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  leaveByTime: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#E65100',
+  },
+
+  // No routes / hint boxes
+  noRoutesBox: {
+    alignItems: 'center',
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+  },
+  noRoutesIcon: {
+    fontSize: 40,
+    marginBottom: 10,
+  },
+  noRoutesTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#222',
+    marginBottom: 8,
+  },
+  noRoutesSubtitle: {
+    fontSize: 14,
+    color: '#777',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  hintBox: {
+    alignItems: 'center',
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+  },
+  hintIcon: {
+    fontSize: 40,
+    marginBottom: 10,
+  },
+  hintText: {
+    fontSize: 14,
+    color: '#888',
+    textAlign: 'center',
+    lineHeight: 21,
+  },
+
+  // ── Bottom bar ─────────────────────────────────
+  bottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+  },
+  userPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  initialsCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#f19539',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  initialsText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  loginText: {
+    fontSize: 14,
+    color: '#1565C0',
+    fontWeight: '600',
+  },
+
+  // Routes toggle button (expanded bottom bar)
+  routesBtnSm: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 14,
+    backgroundColor: '#f0f0f0',
+    borderWidth: 1.5,
+    borderColor: '#ddd',
+  },
+  routesBtnActive: {
+    backgroundColor: '#1565C0',
+    borderColor: '#1565C0',
+  },
+  routesBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#333',
+    textAlign: 'center',
+    lineHeight: 15,
+  },
+  routesBtnTextActive: {
+    color: '#fff',
+  },
+});
