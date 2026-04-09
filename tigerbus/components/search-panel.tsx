@@ -102,9 +102,10 @@ export default function SearchPanel({
   const [isLoadingGeo, setIsLoadingGeo] = useState(false);
   const [navStarted, setNavStarted] = useState(false);
 
-  // Arrival time picker
+  // Arrival time picker — single modal, two steps
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
-  const [showPicker, setShowPicker] = useState<'date' | 'time' | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const [pickerStep, setPickerStep] = useState<'date' | 'time'>('date');
   const [pendingDate, setPendingDate] = useState<Date>(new Date());
 
   const handleArrivalTimeChange = (selected: Date | null) => {
@@ -173,11 +174,11 @@ export default function SearchPanel({
 
   // ─── Geocoding helpers ──────────────────────────
   const triggerGeoSearch = (text: string) => {
-  if (debounceRef.current) clearTimeout(debounceRef.current);
-  if (text.trim().length < 2) { setGeoResults([]); return; }
-  const results = fetchPlaces(text);
-  setGeoResults(results);
-};
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (text.trim().length < 2) { setGeoResults([]); return; }
+    const results = fetchPlaces(text);
+    setGeoResults(results);
+  };
 
   const handleToTextChange = (text: string) => {
     setToText(text);
@@ -219,7 +220,6 @@ export default function SearchPanel({
   };
 
   // ─── Keyboard avoidance ─────────────────────────
-  // Lift the whole panel up by the keyboard height so inputs stay visible.
   const panelBottom = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -397,7 +397,7 @@ export default function SearchPanel({
         </View>
       </View>
 
-      {/* ── Arrival time row (between from/to card and results) ── */}
+      {/* ── Arrival time row ── */}
       <Animated.View
         style={[
           styles.arrivalRowWrap,
@@ -416,7 +416,8 @@ export default function SearchPanel({
             style={[styles.arrivalPill, arrivalTime && styles.arrivalPillSet]}
             onPress={() => {
               setPendingDate(arrivalTime ?? new Date());
-              setShowPicker('date');
+              setPickerStep('date');
+              setShowPicker(true);
             }}
           >
             <Text style={[styles.arrivalPillText, arrivalTime && styles.arrivalPillTextSet]}>
@@ -431,56 +432,60 @@ export default function SearchPanel({
         </View>
       </Animated.View>
 
-      {/* Date/time picker modals */}
-      {showPicker === 'date' && (
-        <Modal transparent animationType="fade">
-          <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(null)}>
-            <View style={styles.pickerCard} onStartShouldSetResponder={() => true}>
-              <Text style={styles.pickerTitle}>Select date</Text>
-              <View style={{ backgroundColor: '#f5f5f5', borderRadius: 12 }}>
-              <DateTimePicker
-                value={pendingDate}
-                mode="date"
-                display="inline"
-                themeVariant="light"
-                minimumDate={new Date()}
-                onChange={(_, d) => d && setPendingDate(d)}
-                />
-            </View>
-              <Pressable
-                style={styles.pickerNext}
-                onPress={() => setShowPicker('time')}
-              >
-                <Text style={styles.pickerNextText}>Next →</Text>
-              </Pressable>
-            </View>
-          </Pressable>
-        </Modal>
-      )}
-      {showPicker === 'time' && (
-        <Modal transparent animationType="fade">
-          <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(null)}>
-            <View style={styles.pickerCard} onStartShouldSetResponder={() => true}>
-              <Text style={styles.pickerTitle}>Select time</Text>
-              <View style={{ backgroundColor: '#f5f5f5', borderRadius: 12 }}>
-              <DateTimePicker
-                value={pendingDate}
-                mode="time"
-                display={Platform.OS === 'ios' ? 'spinner' : 'clock'}
-                themeVariant="light"
-                onChange={(_, d) => d && setPendingDate(d)}
-              />
-            </View>
-              <Pressable
-                style={styles.pickerNext}
-                onPress={() => {
-                  handleArrivalTimeChange(pendingDate);
-                  setShowPicker(null);
-                }}
-              >
-                <Text style={styles.pickerNextText}>Confirm</Text>
-              </Pressable>
-            </View>
+      {/* ── Date/time picker — single modal, two steps ── */}
+      {showPicker && (
+        <Modal transparent animationType="fade" onRequestClose={() => setShowPicker(false)}>
+          <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(false)}>
+            {/* Inner Pressable stops taps on the card from bubbling up to the backdrop dismiss */}
+            <Pressable style={styles.pickerCard}>
+              {pickerStep === 'date' ? (
+                <>
+                  <Text style={styles.pickerTitle}>Select date</Text>
+                  <DateTimePicker
+                    value={pendingDate}
+                    mode="date"
+                    display="spinner"
+                    themeVariant="light"
+                    minimumDate={new Date()}
+                    onChange={(_, d) => { if (d) setPendingDate(d); }}
+                  />
+                  <Pressable
+                    style={styles.pickerNext}
+                    onPress={() => setPickerStep('time')}
+                  >
+                    <Text style={styles.pickerNextText}>Next →</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.pickerTitle}>Select time</Text>
+                  <DateTimePicker
+                    value={pendingDate}
+                    mode="time"
+                    display="spinner"
+                    themeVariant="light"
+                    onChange={(_, d) => { if (d) setPendingDate(d); }}
+                  />
+                  <View style={styles.pickerButtonRow}>
+                    <Pressable
+                      style={styles.pickerBack}
+                      onPress={() => setPickerStep('date')}
+                    >
+                      <Text style={styles.pickerBackText}>← Back</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.pickerNext, { flex: 1 }]}
+                      onPress={() => {
+                        handleArrivalTimeChange(pendingDate);
+                        setShowPicker(false);
+                      }}
+                    >
+                      <Text style={styles.pickerNextText}>Confirm</Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
+            </Pressable>
           </Pressable>
         </Modal>
       )}
@@ -551,7 +556,6 @@ export default function SearchPanel({
 
                       {/* Option details */}
                       <View style={styles.optionDetails}>
-                        {/* Walk-time summary instruction */}
                         {opt.type === 'direct' ? (
                           <Text style={styles.optionInstruction} numberOfLines={2}>
                             Walk {Math.ceil(opt.walkToBoard / 80)}min → {opt.routes[0].name} → Walk {Math.ceil(opt.walkFromAlight / 80)}min
@@ -562,7 +566,6 @@ export default function SearchPanel({
                           </Text>
                         )}
 
-                        {/* Stop details */}
                         {opt.type === 'direct' ? (
                           <>
                             <Text style={styles.optionStopLine} numberOfLines={1}>
@@ -610,7 +613,7 @@ export default function SearchPanel({
                           </View>
                         )}
                         {isSelected && (
-                            <>
+                          <>
                             <Text style={styles.optionShowingTag}>Showing</Text>
                             <Pressable
                               style={styles.letsGoBtn}
@@ -670,79 +673,81 @@ export default function SearchPanel({
           </Pressable>
         </View>
       </Animated.View>
+
+      {/* ── Turn-by-turn nav modal ── */}
       {navStarted && selectedOption && (
-  <Modal transparent animationType="slide">
-    <View style={styles.navModalBackdrop}>
-      <View style={styles.navModal}>
-        <Text style={styles.navModalTitle}>Your Trip</Text>
+        <Modal transparent animationType="slide">
+          <View style={styles.navModalBackdrop}>
+            <View style={styles.navModal}>
+              <Text style={styles.navModalTitle}>Your Trip</Text>
 
-        <View style={styles.navStep}>
-          <Text style={styles.navStepIcon}>🚶</Text>
-          <Text style={styles.navStepText}>
-            Walk {Math.ceil(selectedOption.walkToBoard / 80)} min to{' '}
-            <Text style={styles.navStepBold}>{selectedOption.boardStop.name}</Text>
-          </Text>
-        </View>
+              <View style={styles.navStep}>
+                <Text style={styles.navStepIcon}>🚶</Text>
+                <Text style={styles.navStepText}>
+                  Walk {Math.ceil(selectedOption.walkToBoard / 80)} min to{' '}
+                  <Text style={styles.navStepBold}>{selectedOption.boardStop.name}</Text>
+                </Text>
+              </View>
 
-        <View style={styles.navDivider} />
+              <View style={styles.navDivider} />
 
-        <View style={styles.navStep}>
-          <Text style={styles.navStepIcon}>🚌</Text>
-          <Text style={styles.navStepText}>
-            Board{' '}
-            <Text style={styles.navStepBold}>{selectedOption.routes[0].name}</Text>
-            {selectedOption.nextBusSeconds !== undefined && (
-              <Text style={styles.navStepMuted}>
-                {' '}(next bus in {Math.ceil(selectedOption.nextBusSeconds / 60)} min)
-              </Text>
-            )}
-          </Text>
-        </View>
+              <View style={styles.navStep}>
+                <Text style={styles.navStepIcon}>🚌</Text>
+                <Text style={styles.navStepText}>
+                  Board{' '}
+                  <Text style={styles.navStepBold}>{selectedOption.routes[0].name}</Text>
+                  {selectedOption.nextBusSeconds !== undefined && (
+                    <Text style={styles.navStepMuted}>
+                      {' '}(next bus in {Math.ceil(selectedOption.nextBusSeconds / 60)} min)
+                    </Text>
+                  )}
+                </Text>
+              </View>
 
-        <View style={styles.navDivider} />
+              <View style={styles.navDivider} />
 
-        {selectedOption.type === 'transfer' && selectedOption.transferStop && (
-          <>
-            <View style={styles.navStep}>
-              <Text style={styles.navStepIcon}>🔄</Text>
-              <Text style={styles.navStepText}>
-                Transfer at{' '}
-                <Text style={styles.navStepBold}>{selectedOption.transferStop.name}</Text>
-                {' '}to{' '}
-                <Text style={styles.navStepBold}>{selectedOption.routes[1].name}</Text>
-              </Text>
+              {selectedOption.type === 'transfer' && selectedOption.transferStop && (
+                <>
+                  <View style={styles.navStep}>
+                    <Text style={styles.navStepIcon}>🔄</Text>
+                    <Text style={styles.navStepText}>
+                      Transfer at{' '}
+                      <Text style={styles.navStepBold}>{selectedOption.transferStop.name}</Text>
+                      {' '}to{' '}
+                      <Text style={styles.navStepBold}>{selectedOption.routes[1].name}</Text>
+                    </Text>
+                  </View>
+                  <View style={styles.navDivider} />
+                </>
+              )}
+
+              <View style={styles.navStep}>
+                <Text style={styles.navStepIcon}>📍</Text>
+                <Text style={styles.navStepText}>
+                  Get off at{' '}
+                  <Text style={styles.navStepBold}>{selectedOption.alightStop.name}</Text>
+                </Text>
+              </View>
+
+              <View style={styles.navDivider} />
+
+              <View style={styles.navStep}>
+                <Text style={styles.navStepIcon}>🚶</Text>
+                <Text style={styles.navStepText}>
+                  Walk {Math.ceil(selectedOption.walkFromAlight / 80)} min to your destination
+                </Text>
+              </View>
+
+              <Pressable
+                style={styles.navCloseBtn}
+                onPress={() => setNavStarted(false)}
+              >
+                <Text style={styles.navCloseBtnText}>Close</Text>
+              </Pressable>
             </View>
-            <View style={styles.navDivider} />
-          </>
-        )}
-
-        <View style={styles.navStep}>
-          <Text style={styles.navStepIcon}>📍</Text>
-          <Text style={styles.navStepText}>
-            Get off at{' '}
-            <Text style={styles.navStepBold}>{selectedOption.alightStop.name}</Text>
-          </Text>
-        </View>
-
-        <View style={styles.navDivider} />
-
-        <View style={styles.navStep}>
-          <Text style={styles.navStepIcon}>🚶</Text>
-          <Text style={styles.navStepText}>
-            Walk {Math.ceil(selectedOption.walkFromAlight / 80)} min to your destination
-          </Text>
-        </View>
-
-        <Pressable
-          style={styles.navCloseBtn}
-          onPress={() => setNavStarted(false)}
-        >
-          <Text style={styles.navCloseBtnText}>Close</Text>
-        </Pressable>
-      </View>
-    </View>
-  </Modal>
-)}
+          </View>
+        </Modal>
+      )}
     </Animated.View>
   );
 }
@@ -772,8 +777,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     marginBottom: 8,
   },
-
-  // The single From/To card (replaces old search bar + trip card)
   fromToCard: {
     backgroundColor: '#f0f0f0',
     borderRadius: 20,
@@ -854,8 +857,6 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 14,
   },
-
-  // ── Results list ───────────────────────────────
   resultsList: {
     flex: 1,
   },
@@ -1045,24 +1046,40 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   pickerCard: {
-  backgroundColor: '#fff',
-  borderRadius: 20,
-  padding: 20,
-  width: '100%',
-  shadowColor: '#000',
-  shadowOpacity: 0.2,
-  shadowRadius: 12,
-  shadowOffset: { width: 0, height: 4 },
-  elevation: 8,
-  // Add this:
-  minHeight: 200,
-},
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 20,
+    width: '100%',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
   pickerTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: '#111',
     marginBottom: 12,
     textAlign: 'center',
+  },
+  pickerButtonRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 16,
+  },
+  pickerBack: {
+    backgroundColor: '#f0f0f0',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerBackText: {
+    color: '#555',
+    fontWeight: '700',
+    fontSize: 15,
   },
   pickerNext: {
     marginTop: 16,
@@ -1169,8 +1186,6 @@ const styles = StyleSheet.create({
     color: '#1565C0',
     fontWeight: '600',
   },
-
-  // Routes toggle button (expanded bottom bar)
   routesBtnSm: {
     paddingHorizontal: 14,
     paddingVertical: 8,
@@ -1193,75 +1208,79 @@ const styles = StyleSheet.create({
   routesBtnTextActive: {
     color: '#fff',
   },
+
+  // ── Let's Go button ────────────────────────────
   letsGoBtn: {
-  backgroundColor: '#1565C0',
-  borderRadius: 10,
-  paddingHorizontal: 10,
-  paddingVertical: 6,
-  marginTop: 4,
-  alignItems: 'center',
-},
-letsGoBtnText: {
-  color: '#fff',
-  fontSize: 12,
-  fontWeight: '700',
-},
-navModalBackdrop: {
-  flex: 1,
-  backgroundColor: 'rgba(0,0,0,0.5)',
-  justifyContent: 'flex-end',
-},
-navModal: {
-  backgroundColor: '#fff',
-  borderTopLeftRadius: 24,
-  borderTopRightRadius: 24,
-  padding: 24,
-  paddingBottom: 40,
-},
-navModalTitle: {
-  fontSize: 20,
-  fontWeight: '800',
-  color: '#111',
-  marginBottom: 20,
-},
-navStep: {
-  flexDirection: 'row',
-  alignItems: 'flex-start',
-  gap: 12,
-  paddingVertical: 12,
-},
-navStepIcon: {
-  fontSize: 22,
-},
-navStepText: {
-  flex: 1,
-  fontSize: 15,
-  color: '#333',
-  lineHeight: 22,
-},
-navStepBold: {
-  fontWeight: '700',
-  color: '#111',
-},
-navStepMuted: {
-  color: '#888',
-  fontWeight: '400',
-},
-navDivider: {
-  height: 1,
-  backgroundColor: '#f0f0f0',
-  marginLeft: 34,
-},
-navCloseBtn: {
-  marginTop: 20,
-  backgroundColor: '#f0f0f0',
-  borderRadius: 14,
-  paddingVertical: 14,
-  alignItems: 'center',
-},
-navCloseBtnText: {
-  fontSize: 16,
-  fontWeight: '700',
-  color: '#333',
-},
+    backgroundColor: '#1565C0',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginTop: 4,
+    alignItems: 'center',
+  },
+  letsGoBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // ── Nav modal ──────────────────────────────────
+  navModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  navModal: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+  },
+  navModalTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#111',
+    marginBottom: 20,
+  },
+  navStep: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    paddingVertical: 12,
+  },
+  navStepIcon: {
+    fontSize: 22,
+  },
+  navStepText: {
+    flex: 1,
+    fontSize: 15,
+    color: '#333',
+    lineHeight: 22,
+  },
+  navStepBold: {
+    fontWeight: '700',
+    color: '#111',
+  },
+  navStepMuted: {
+    color: '#888',
+    fontWeight: '400',
+  },
+  navDivider: {
+    height: 1,
+    backgroundColor: '#f0f0f0',
+    marginLeft: 34,
+  },
+  navCloseBtn: {
+    marginTop: 20,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  navCloseBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#333',
+  },
 });
