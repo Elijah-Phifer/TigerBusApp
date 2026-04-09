@@ -442,31 +442,18 @@ useEffect(() => {
   
   if (!region) return null;
 
-  // Compute which routes to display: all routes in any option when in nav mode, else all/none
-  const displayRoutes = (() => {
-    if (selectedOption) {
-      return BUS_ROUTES.filter((r) => 
-        selectedOption.routes.some((sr) => sr.id === r.id)
-      );
-    }
-    if (navDestination && routeOptions.length > 0) {
-      const allOptionRouteIds = new Set(routeOptions.flatMap((o) => o.routes.map((r) => r.id)));
-      return BUS_ROUTES.filter((r) => allOptionRouteIds.has(r.id));
-    }
-    if (navDestination) return [];
-    return showAllRoutes ? BUS_ROUTES : [];
-  })();
+  // IDs of routes in the currently selected option
+  const selectedOptionRouteIds = new Set(selectedOption?.routes.map((r) => r.id) ?? []);
+
+  // IDs of routes that appear in ANY available option (candidate routes)
+  const candidateRouteIds = new Set(routeOptions.flatMap((o) => o.routes.map((r) => r.id)));
+
+  // Always render ALL BUS_ROUTES with stable keys to prevent MapView ghost-polyline bugs.
+  // Visibility (show/hide/highlight) is controlled purely via strokeColor and strokeWidth.
+  const displayRoutes = BUS_ROUTES;
 
   // Show stops only for the routes in the selected option
-  const selectedOptionRouteIds = new Set(selectedOption?.routes.map((r) => r.id) ?? []);
-  const displayStops = (() => {
-    if (!selectedOption) return [];
-    return BUS_STOPS.filter((stop) =>
-      selectedOption.routes.some((route) =>
-        isNearRoute({ latitude: stop.latitude, longitude: stop.longitude }, route.segments, 150)
-      )
-    );
-  })();
+  const displayStops: typeof BUS_STOPS = [];
 
   return (
     <View style={styles.container}>
@@ -504,15 +491,48 @@ useEffect(() => {
       >
 
         {displayRoutes.flatMap((route) => {
-          const hasSelection = selectedOption !== null;
-          const isInOption = selectedOptionRouteIds.has(route.id);
+          const isCandidate = candidateRouteIds.has(route.id);
+          const isSelected = selectedOptionRouteIds.has(route.id);
+
+          // Visibility rules:
+          //  • No nav mode            → show all routes normally (showAllRoutes toggle)
+          //  • Nav mode, loading      → hide everything (candidateRouteIds empty)
+          //  • Nav mode, no selection → show all candidates at equal weight
+          //  • Nav mode, selection    → highlight selected, hide the rest
+          let strokeColor: string;
+          let strokeWidth: number;
+
+          if (!navDestination) {
+            strokeColor = showAllRoutes ? route.color : 'transparent';
+            strokeWidth = showAllRoutes ? 4 : 0;
+          } else if (selectedOption) {
+            strokeColor = isSelected ? route.color : 'transparent';
+            strokeWidth = isSelected ? 7 : 0;
+          } else if (isCandidate) {
+            strokeColor = route.color;
+            strokeWidth = 5;
+          } else {
+            strokeColor = 'transparent';
+            strokeWidth = 0;
+          }
+
+          // Include a state fingerprint in the key so React Native fully destroys
+          // and recreates the native Polyline view whenever selection changes.
+          // This is required because react-native-maps does not reliably update
+          // strokeColor/strokeWidth on already-mounted native views.
+          const selectionFingerprint = selectedOption
+            ? `sel-${selectedOption.routes.map((r) => r.id).join('-')}`
+            : navDestination
+            ? `cand-${[...candidateRouteIds].sort().join('-')}`
+            : 'normal';
 
           return route.segments.map((segment, segIdx) => (
             <Polyline
-              key={`${route.id}-${segIdx}`}
+              key={`${route.id}-${segIdx}-${selectionFingerprint}`}
               coordinates={segment}
-              strokeColor={!hasSelection || isInOption ? route.color : 'rgba(0,0,0,0.08)'}
-              strokeWidth={isInOption ? 7 : hasSelection ? 2 : navDestination ? 5 : 4}
+              strokeColor={strokeColor}
+              strokeWidth={strokeWidth}
+              zIndex={isSelected ? 2 : 1}
             />
           ));
         })}
