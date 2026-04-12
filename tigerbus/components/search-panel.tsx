@@ -102,28 +102,18 @@ export default function SearchPanel({
   const [isLoadingGeo, setIsLoadingGeo] = useState(false);
   const [navStarted, setNavStarted] = useState(false);
 
-  // Arrival time picker — single modal, two steps
+  // Arrival time picker — time only
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
   const [showPicker, setShowPicker] = useState(false);
-  const [pickerStep, setPickerStep] = useState<'date' | 'time'>('date');
-  const [pendingDate, setPendingDate] = useState<Date>(new Date());
+  const [pendingTime, setPendingTime] = useState<Date>(new Date());
 
   const handleArrivalTimeChange = (selected: Date | null) => {
     setArrivalTime(selected);
     onArrivalTimeChange(selected);
   };
 
-  const formatArrivalTime = (d: Date) => {
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(now.getDate() + 1);
-    const isTomorrow = d.toDateString() === tomorrow.toDateString();
-    const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    if (isToday) return `Today ${timeStr}`;
-    if (isTomorrow) return `Tomorrow ${timeStr}`;
-    return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${timeStr}`;
-  };
+  const formatArrivalTime = (d: Date) =>
+    d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
   /** Estimate bus ride time in minutes between two stops using haversine + winding factor */
   const estimateBusMins = (opt: RouteOption): number => {
@@ -415,8 +405,7 @@ export default function SearchPanel({
           <Pressable
             style={[styles.arrivalPill, arrivalTime && styles.arrivalPillSet]}
             onPress={() => {
-              setPendingDate(arrivalTime ?? new Date());
-              setPickerStep('date');
+              setPendingTime(arrivalTime ?? new Date());
               setShowPicker(true);
             }}
           >
@@ -432,61 +421,52 @@ export default function SearchPanel({
         </View>
       </Animated.View>
 
-      {/* ── Date/time picker — single modal, two steps ── */}
-      {showPicker && (
-        <Modal transparent animationType="fade" onRequestClose={() => setShowPicker(false)}>
-          <Pressable style={styles.pickerBackdrop} onPress={() => setShowPicker(false)}>
-            {/* Inner Pressable stops taps on the card from bubbling up to the backdrop dismiss */}
-            <Pressable style={styles.pickerCard}>
-              {pickerStep === 'date' ? (
-                <>
-                  <Text style={styles.pickerTitle}>Select date</Text>
-                  <DateTimePicker
-                    value={pendingDate}
-                    mode="date"
-                    display="spinner"
-                    themeVariant="light"
-                    minimumDate={new Date()}
-                    onChange={(_, d) => { if (d) setPendingDate(d); }}
-                  />
-                  <Pressable
-                    style={styles.pickerNext}
-                    onPress={() => setPickerStep('time')}
-                  >
-                    <Text style={styles.pickerNextText}>Next →</Text>
-                  </Pressable>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.pickerTitle}>Select time</Text>
-                  <DateTimePicker
-                    value={pendingDate}
-                    mode="time"
-                    display="spinner"
-                    themeVariant="light"
-                    onChange={(_, d) => { if (d) setPendingDate(d); }}
-                  />
-                  <View style={styles.pickerButtonRow}>
-                    <Pressable
-                      style={styles.pickerBack}
-                      onPress={() => setPickerStep('date')}
-                    >
-                      <Text style={styles.pickerBackText}>← Back</Text>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.pickerNext, { flex: 1 }]}
-                      onPress={() => {
-                        handleArrivalTimeChange(pendingDate);
-                        setShowPicker(false);
-                      }}
-                    >
-                      <Text style={styles.pickerNextText}>Confirm</Text>
-                    </Pressable>
-                  </View>
-                </>
-              )}
-            </Pressable>
-          </Pressable>
+      {/* ── Time picker ── */}
+      {Platform.OS === 'android' ? (
+        // Android: native clock dialog — onChange fires once with the chosen time or dismissed
+        showPicker && (
+          <DateTimePicker
+            value={pendingTime}
+            mode="time"
+            display="clock"
+            onChange={(event, d) => {
+              setShowPicker(false);
+              if (event.type === 'set' && d) {
+                handleArrivalTimeChange(d);
+              }
+            }}
+          />
+        )
+      ) : (
+        // iOS: custom modal with spinner — backdrop dismisses, Confirm commits
+        <Modal
+          visible={showPicker}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowPicker(false)}
+        >
+          <View style={styles.pickerBackdrop}>
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowPicker(false)} />
+            <View style={styles.pickerCard}>
+              <Text style={styles.pickerTitle}>Arrive by</Text>
+              <DateTimePicker
+                value={pendingTime}
+                mode="time"
+                display="spinner"
+                themeVariant="light"
+                onChange={(_, d) => { if (d) setPendingTime(d); }}
+              />
+              <Pressable
+                style={styles.pickerNext}
+                onPress={() => {
+                  handleArrivalTimeChange(pendingTime);
+                  setShowPicker(false);
+                }}
+              >
+                <Text style={styles.pickerNextText}>Confirm</Text>
+              </Pressable>
+            </View>
+          </View>
         </Modal>
       )}
 
@@ -1062,24 +1042,6 @@ const styles = StyleSheet.create({
     color: '#111',
     marginBottom: 12,
     textAlign: 'center',
-  },
-  pickerButtonRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 16,
-  },
-  pickerBack: {
-    backgroundColor: '#f0f0f0',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pickerBackText: {
-    color: '#555',
-    fontWeight: '700',
-    fontSize: 15,
   },
   pickerNext: {
     marginTop: 16,
