@@ -4,7 +4,7 @@
     "slug": "tigerbus",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/temp_tigerBus_icon.png",
     "scheme": "tigerbus",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,

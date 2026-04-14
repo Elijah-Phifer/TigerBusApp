@@ -49,3 +49,35 @@ export function routeServesTrip(
     isNearRoute(destination, route.segments, thresholdMeters)
   );
 }
+
+/**
+ * Clips a route's segments to only the portion between two stops.
+ * Returns a single array of GeoPoints from boardStop to alightStop.
+ */
+export function clipRouteBetweenStops(
+  segments: GeoPoint[][],
+  boardStop: GeoPoint,
+  alightStop: GeoPoint
+): GeoPoint[] {
+  // Flatten all segments into one continuous polyline
+  const flat = segments.flat();
+
+  // Find index of closest point to board and alight stops
+  let boardIdx = 0;
+  let alightIdx = 0;
+  let boardDist = Infinity;
+  let alightDist = Infinity;
+
+  flat.forEach((pt, i) => {
+    const dBoard = haversineMeters(pt, boardStop);
+    const dAlight = haversineMeters(pt, alightStop);
+    if (dBoard < boardDist) { boardDist = dBoard; boardIdx = i; }
+    if (dAlight < alightDist) { alightDist = dAlight; alightIdx = i; }
+  });
+
+  // Ensure correct order
+  const start = Math.min(boardIdx, alightIdx);
+  const end = Math.max(boardIdx, alightIdx);
+
+  return flat.slice(start, end + 1);
+}
