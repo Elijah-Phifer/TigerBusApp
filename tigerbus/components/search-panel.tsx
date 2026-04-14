@@ -28,13 +28,13 @@ import { useAuth } from '../context/AuthContext';
 import { RouteOption } from '../utils/tripPlanner';
 import { haversineMeters } from '../utils/routeMatching';
 import { BUS_STOPS } from '../app/busStops';
-
+ 
 export type NavPlace = {
   name: string;
   latitude: number;
   longitude: number;
 };
-
+ 
 type SearchPanelProps = {
   isOpen: boolean;
   slideAnim: Animated.Value;
@@ -54,11 +54,13 @@ type SearchPanelProps = {
   onSelectOption: (opt: RouteOption) => void; // toggle: tapping same option deselects
   routesLoading: boolean;            // true while fetching active routes
   onArrivalTimeChange: (time: Date | null) => void;
+  starredRouteIds: number[];
+  onToggleStarRoute: (routeId: number) => void;
 };
-
+ 
 const getInitials = (name: string) =>
   name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
-
+ 
 function fetchPlaces(query: string): NavPlace[] {
   if (query.trim().length < 2) return [];
   const q = query.trim().toLowerCase();
@@ -71,7 +73,7 @@ function fetchPlaces(query: string): NavPlace[] {
       longitude: stop.longitude,
     }));
 }
-
+ 
 export default function SearchPanel({
   isOpen,
   slideAnim,
@@ -90,10 +92,12 @@ export default function SearchPanel({
   onSelectOption,
   routesLoading,
   onArrivalTimeChange,
+  starredRouteIds,
+  onToggleStarRoute,
 }: SearchPanelProps) {
   const router = useRouter();
   const { user } = useAuth();
-
+ 
   // Which input field is being edited right now
   const [editingField, setEditingField] = useState<'from' | 'to' | null>(null);
   const [toText, setToText] = useState('');
@@ -101,27 +105,27 @@ export default function SearchPanel({
   const [geoResults, setGeoResults] = useState<NavPlace[]>([]);
   const [isLoadingGeo, setIsLoadingGeo] = useState(false);
   const [navStarted, setNavStarted] = useState(false);
-
+ 
   // Arrival time picker — time only
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [pendingTime, setPendingTime] = useState<Date>(new Date());
-
+ 
   const handleArrivalTimeChange = (selected: Date | null) => {
     setArrivalTime(selected);
     onArrivalTimeChange(selected);
   };
-
+ 
   const formatArrivalTime = (d: Date) =>
     d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-
+ 
   /** Estimate bus ride time in minutes between two stops using haversine + winding factor */
   const estimateBusMins = (opt: RouteOption): number => {
     const dist = haversineMeters(opt.boardStop, opt.alightStop);
     // 20 km/h average bus speed = 333 m/min; 1.5x for route winding
     return Math.ceil((dist * 1.5) / 333);
   };
-
+ 
   /** Compute "leave by" time given a desired arrival time */
   const computeLeaveBy = (opt: RouteOption, arrival: Date): Date => {
     const totalMins =
@@ -130,23 +134,23 @@ export default function SearchPanel({
       Math.ceil(opt.walkFromAlight / 80);
     return new Date(arrival.getTime() - totalMins * 60 * 1000);
   };
-
+ 
   const formatTime = (d: Date) =>
     d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-
+ 
   const toInputRef = useRef<TextInput | null>(null);
   const fromInputRef = useRef<TextInput | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+ 
   // Sync local text when parent nav state changes
   useEffect(() => {
     setToText(navDestination?.name ?? '');
   }, [navDestination]);
-
+ 
   useEffect(() => {
     setFromText(navOrigin?.name ?? '');
   }, [navOrigin]);
-
+ 
   // Auto-focus 'To' input when panel opens in nav-input mode
   useEffect(() => {
     if (isOpen && editingField === 'to') {
@@ -154,14 +158,14 @@ export default function SearchPanel({
       return () => clearTimeout(t);
     }
   }, [isOpen, editingField]);
-
+ 
   useEffect(() => {
     if (isOpen && editingField === 'from') {
       const t = setTimeout(() => fromInputRef.current?.focus(), 150);
       return () => clearTimeout(t);
     }
   }, [isOpen, editingField]);
-
+ 
   // ─── Geocoding helpers ──────────────────────────
   const triggerGeoSearch = (text: string) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -169,19 +173,19 @@ export default function SearchPanel({
     const results = fetchPlaces(text);
     setGeoResults(results);
   };
-
+ 
   const handleToTextChange = (text: string) => {
     setToText(text);
     if (navDestination) onSetDestination(null); // clear confirmed dest on edit
     triggerGeoSearch(text);
   };
-
+ 
   const handleFromTextChange = (text: string) => {
     setFromText(text);
     if (navOrigin) onSetOrigin(null);
     triggerGeoSearch(text);
   };
-
+ 
   const handleSelectPlace = (place: NavPlace) => {
     setGeoResults([]);
     Keyboard.dismiss();
@@ -198,7 +202,7 @@ export default function SearchPanel({
       if (!navDestination) setEditingField('to');
     }
   };
-
+ 
   const handleClearTrip = () => {
     setToText('');
     setFromText('');
@@ -208,14 +212,14 @@ export default function SearchPanel({
     onSetOrigin(null);
     Keyboard.dismiss();
   };
-
+ 
   // ─── Keyboard avoidance ─────────────────────────
   const panelBottom = useRef(new Animated.Value(0)).current;
-
+ 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-
+ 
     const onShow = (e: KeyboardEvent) => {
       Animated.timing(panelBottom, {
         toValue: e.endCoordinates.height,
@@ -230,12 +234,12 @@ export default function SearchPanel({
         useNativeDriver: false,
       }).start();
     };
-
+ 
     const showSub = Keyboard.addListener(showEvent, onShow);
     const hideSub = Keyboard.addListener(hideEvent, onHide);
     return () => { showSub.remove(); hideSub.remove(); };
   }, [panelBottom]);
-
+ 
   // ─── PanResponder ───────────────────────────────
   const isOpenRef = useRef(isOpen);
   isOpenRef.current = isOpen;
@@ -245,7 +249,7 @@ export default function SearchPanel({
   onCloseRef.current = onClose;
   const dragStartProgressRef = useRef(isOpen ? 1 : 0);
   const travelDistance = panelHeight - collapsedHeight;
-
+ 
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_, gs) =>
@@ -270,11 +274,11 @@ export default function SearchPanel({
       },
     })
   ).current;
-
+ 
   // ─── Derived UI state ───────────────────────────
   const hasTrip = !!navDestination;
   const isEditing = editingField !== null;
-
+ 
   // ─── Render ─────────────────────────────────────
   return (
     <Animated.View
@@ -310,11 +314,11 @@ export default function SearchPanel({
           },
         ]}
       />
-
+ 
       {/* ── Always-visible From / To card ── */}
       <View style={styles.headerWrap}>
         <View style={styles.fromToCard}>
-
+ 
           {/* From row */}
           <View style={styles.cardRow}>
             <View style={[styles.navDot, styles.navDotFrom]} />
@@ -358,12 +362,12 @@ export default function SearchPanel({
               </Pressable>
             )}
           </View>
-
+ 
           {/* Connector between rows */}
           <View style={styles.cardConnector}>
             <View style={styles.connectorLine} />
           </View>
-
+ 
           {/* To row */}
           <View style={styles.cardRow}>
             <View style={[styles.navDot, styles.navDotTo]} />
@@ -383,10 +387,10 @@ export default function SearchPanel({
               </Pressable>
             )}
           </View>
-
+ 
         </View>
       </View>
-
+ 
       {/* ── Arrival time row ── */}
       <Animated.View
         style={[
@@ -420,7 +424,7 @@ export default function SearchPanel({
           )}
         </View>
       </Animated.View>
-
+ 
       {/* ── Time picker ── */}
       {Platform.OS === 'android' ? (
         // Android: native clock dialog — onChange fires once with the chosen time or dismissed
@@ -469,7 +473,7 @@ export default function SearchPanel({
           </View>
         </Modal>
       )}
-
+ 
       {/* ── Expanded content ── */}
       <Animated.View
         style={[
@@ -533,7 +537,7 @@ export default function SearchPanel({
                           <View key={r.id} style={[styles.optionColorBar, { backgroundColor: r.color }]} />
                         ))}
                       </View>
-
+ 
                       {/* Option details */}
                       <View style={styles.optionDetails}>
                         {opt.type === 'direct' ? (
@@ -545,7 +549,7 @@ export default function SearchPanel({
                             Walk {Math.ceil(opt.walkToBoard / 80)}min → {opt.routes[0].name} → {opt.routes[1].name} → Walk {Math.ceil(opt.walkFromAlight / 80)}min
                           </Text>
                         )}
-
+ 
                         {opt.type === 'direct' ? (
                           <>
                             <Text style={styles.optionStopLine} numberOfLines={1}>
@@ -569,7 +573,7 @@ export default function SearchPanel({
                           </>
                         )}
                       </View>
-
+ 
                       {/* Badges */}
                       <View style={styles.optionBadgeWrap}>
                         <View style={[styles.optionBadge, { backgroundColor: opt.type === 'direct' ? '#e8f5e9' : '#fff8e1' }]}>
@@ -604,6 +608,23 @@ export default function SearchPanel({
                           </>
                         )}
                       </View>
+ 
+                      {/* Star button — saves route to home screen strip */}
+                      <Pressable
+                        style={styles.starBtn}
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          opt.routes.forEach((r) => onToggleStarRoute(r.id));
+                        }}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      >
+                        <Text style={[
+                          styles.starIcon,
+                          opt.routes.some((r) => starredRouteIds.includes(r.id)) && styles.starIconActive,
+                        ]}>
+                          ★
+                        </Text>
+                      </Pressable>
                     </Pressable>
                   );
                 })}
@@ -626,7 +647,7 @@ export default function SearchPanel({
             </View>
           ) : null}
         </ScrollView>
-
+ 
         {/* Bottom bar: avatar + routes toggle */}
         <View style={styles.bottomRow}>
           <Pressable
@@ -653,14 +674,14 @@ export default function SearchPanel({
           </Pressable>
         </View>
       </Animated.View>
-
+ 
       {/* ── Turn-by-turn nav modal ── */}
       {navStarted && selectedOption && (
         <Modal transparent animationType="slide">
           <View style={styles.navModalBackdrop}>
             <View style={styles.navModal}>
               <Text style={styles.navModalTitle}>Your Trip</Text>
-
+ 
               <View style={styles.navStep}>
                 <Text style={styles.navStepIcon}>🚶</Text>
                 <Text style={styles.navStepText}>
@@ -668,9 +689,9 @@ export default function SearchPanel({
                   <Text style={styles.navStepBold}>{selectedOption.boardStop.name}</Text>
                 </Text>
               </View>
-
+ 
               <View style={styles.navDivider} />
-
+ 
               <View style={styles.navStep}>
                 <Text style={styles.navStepIcon}>🚌</Text>
                 <Text style={styles.navStepText}>
@@ -683,9 +704,9 @@ export default function SearchPanel({
                   )}
                 </Text>
               </View>
-
+ 
               <View style={styles.navDivider} />
-
+ 
               {selectedOption.type === 'transfer' && selectedOption.transferStop && (
                 <>
                   <View style={styles.navStep}>
@@ -700,7 +721,7 @@ export default function SearchPanel({
                   <View style={styles.navDivider} />
                 </>
               )}
-
+ 
               <View style={styles.navStep}>
                 <Text style={styles.navStepIcon}>📍</Text>
                 <Text style={styles.navStepText}>
@@ -708,16 +729,16 @@ export default function SearchPanel({
                   <Text style={styles.navStepBold}>{selectedOption.alightStop.name}</Text>
                 </Text>
               </View>
-
+ 
               <View style={styles.navDivider} />
-
+ 
               <View style={styles.navStep}>
                 <Text style={styles.navStepIcon}>🚶</Text>
                 <Text style={styles.navStepText}>
                   Walk {Math.ceil(selectedOption.walkFromAlight / 80)} min to your destination
                 </Text>
               </View>
-
+ 
               <Pressable
                 style={styles.navCloseBtn}
                 onPress={() => setNavStarted(false)}
@@ -731,7 +752,7 @@ export default function SearchPanel({
     </Animated.View>
   );
 }
-
+ 
 const styles = StyleSheet.create({
   panel: {
     position: 'absolute',
@@ -751,7 +772,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     marginBottom: 10,
   },
-
+ 
   // ── Header (always visible) ────────────────────
   headerWrap: {
     paddingHorizontal: 14,
@@ -814,7 +835,7 @@ const styles = StyleSheet.create({
     color: '#bbb',
     fontWeight: '600',
   },
-
+ 
   // ── Nav dots ───────────────────────────────────
   navDot: {
     width: 10,
@@ -831,7 +852,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F44336',
     borderColor: '#C62828',
   },
-
+ 
   // ── Expanded content ───────────────────────────
   expandedContent: {
     flex: 1,
@@ -849,7 +870,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     marginTop: 4,
   },
-
+ 
   // Geocoding results
   geoResultItem: {
     flexDirection: 'row',
@@ -869,7 +890,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     lineHeight: 20,
   },
-
+ 
   // Route option cards
   optionCard: {
     flexDirection: 'row',
@@ -877,11 +898,13 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingVertical: 12,
     paddingHorizontal: 10,
+    paddingRight: 36,
     marginBottom: 8,
     borderRadius: 12,
     backgroundColor: '#f8f8f8',
     borderWidth: 1.5,
     borderColor: '#ebebeb',
+    position: 'relative',
   },
   optionCardSelected: {
     backgroundColor: '#f0f4ff',
@@ -971,7 +994,7 @@ const styles = StyleSheet.create({
     color: '#888',
     fontWeight: '500',
   },
-
+ 
   // ── Arrival time row ───────────────────────────
   arrivalRowWrap: {
     paddingHorizontal: 14,
@@ -1016,7 +1039,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     paddingHorizontal: 4,
   },
-
+ 
   // ── Date/time picker modal ─────────────────────
   pickerBackdrop: {
     flex: 1,
@@ -1055,7 +1078,22 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 15,
   },
-
+ 
+  // ── Star button ────────────────────────────────
+  starBtn: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    padding: 4,
+  },
+  starIcon: {
+    fontSize: 20,
+    color: '#ddd',
+  },
+  starIconActive: {
+    color: '#FDD023',
+  },
+ 
   // ── Leave-by badge ─────────────────────────────
   leaveByBadge: {
     backgroundColor: '#FFF3E0',
@@ -1077,7 +1115,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#E65100',
   },
-
+ 
   // No routes / hint boxes
   noRoutesBox: {
     alignItems: 'center',
@@ -1115,7 +1153,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 21,
   },
-
+ 
   // ── Bottom bar ─────────────────────────────────
   bottomRow: {
     flexDirection: 'row',
@@ -1170,7 +1208,7 @@ const styles = StyleSheet.create({
   routesBtnTextActive: {
     color: '#fff',
   },
-
+ 
   // ── Let's Go button ────────────────────────────
   letsGoBtn: {
     backgroundColor: '#1565C0',
@@ -1185,7 +1223,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-
+ 
   // ── Nav modal ──────────────────────────────────
   navModalBackdrop: {
     flex: 1,
@@ -1246,3 +1284,4 @@ const styles = StyleSheet.create({
     color: '#333',
   },
 });
+ 

@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import "../../global.css";
@@ -82,6 +83,7 @@ const [region, setRegion] = useState<Region | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [showAllRoutes, setShowAllRoutes] = useState(true);
+  const [starredRouteIds, setStarredRouteIds] = useState<number[]>([]);
   const [navDestination, setNavDestination] = useState<NavPlace | null>(null);
   const [navOrigin, setNavOrigin] = useState<NavPlace | null>(null);
   const [routeOptions, setRouteOptions] = useState<RouteOption[]>([]);
@@ -233,6 +235,23 @@ useEffect(() => {
     startBackgroundLocation().catch(() => {});
 
   }, [user]);
+
+  // ─── Starred routes persistence ──────────────
+  useEffect(() => {
+    AsyncStorage.getItem('starredRouteIds').then((val) => {
+      if (val) setStarredRouteIds(JSON.parse(val));
+    });
+  }, []);
+
+  const toggleStarRoute = (routeId: number) => {
+    setStarredRouteIds((prev) => {
+      const next = prev.includes(routeId)
+        ? prev.filter((id) => id !== routeId)
+        : [...prev, routeId];
+      AsyncStorage.setItem('starredRouteIds', JSON.stringify(next));
+      return next;
+    });
+  };
 
   // ─── Real-time posts listener ─────────────────
   useEffect(() => {
@@ -712,6 +731,53 @@ useEffect(() => {
 </Animated.View>
 
 
+      {/* ── Starred Routes Strip (visible when panel is collapsed) ── */}
+      {starredRouteIds.length > 0 && !isOpen && !navDestination && (
+        <Animated.View
+          style={[
+            starStyles.strip,
+            {
+              bottom: COLLAPSED_HEIGHT,
+              opacity: slideAnim.interpolate({
+                inputRange: [0, 0.2],
+                outputRange: [1, 0],
+                extrapolate: 'clamp',
+              }),
+            },
+          ]}
+          pointerEvents="box-none"
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={starStyles.stripContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {starredRouteIds.map((routeId) => {
+              const route = BUS_ROUTES.find((r) => r.id === routeId);
+              if (!route) return null;
+              return (
+                <TouchableOpacity
+                  key={routeId}
+                  style={[starStyles.chip, { borderColor: route.color }]}
+                  onPress={openPanel}
+                  activeOpacity={0.75}
+                >
+                  <View style={[starStyles.chipDot, { backgroundColor: route.color }]} />
+                  <Text style={starStyles.chipText} numberOfLines={1}>{route.name}</Text>
+                  <TouchableOpacity
+                    onPress={() => toggleStarRoute(routeId)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Text style={starStyles.chipStar}>★</Text>
+                  </TouchableOpacity>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </Animated.View>
+      )}
+
 <SearchPanel
         isOpen={isOpen}
         slideAnim={slideAnim}
@@ -745,6 +811,8 @@ useEffect(() => {
         onSelectOption={(opt) => setSelectedOption((prev) => prev?.id === opt.id ? null : opt)}
         routesLoading={routesLoading}
         onArrivalTimeChange={setArrivalTime}
+        starredRouteIds={starredRouteIds}
+        onToggleStarRoute={toggleStarRoute}
       />
 
       <ActionSheet
@@ -1242,4 +1310,51 @@ const popupStyles = StyleSheet.create({
   imageViewerCloseText: { fontSize: 18, color: '#fff', fontWeight: '600' },
   imageCounter: { position: 'absolute', bottom: 60, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
   imageCounterText: { color: '#fff', fontSize: 13, fontWeight: '500' },
+});
+
+const starStyles = StyleSheet.create({
+  strip: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 30,
+    paddingBottom: 8,
+  },
+  stripContent: {
+    paddingHorizontal: 14,
+    gap: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    gap: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.10,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  chipDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+  },
+  chipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#222',
+    maxWidth: 120,
+  },
+  chipStar: {
+    fontSize: 14,
+    color: '#FDD023',
+    lineHeight: 16,
+  },
 });
