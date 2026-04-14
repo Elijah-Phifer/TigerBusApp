@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import "../../global.css";
@@ -48,6 +49,8 @@ import {
   setBackgroundUserId,
 } from '../../utils/checkinService';
 import ActionSheet from '../ActionSheet';
+
+
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const PANEL_HEIGHT = SCREEN_HEIGHT * 0.5;
 const COLLAPSED_HEIGHT = 110;
@@ -80,6 +83,7 @@ const [region, setRegion] = useState<Region | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [showAllRoutes, setShowAllRoutes] = useState(true);
+  const [starredRouteIds, setStarredRouteIds] = useState<number[]>([]);
   const [navDestination, setNavDestination] = useState<NavPlace | null>(null);
   const [navOrigin, setNavOrigin] = useState<NavPlace | null>(null);
   const [routeOptions, setRouteOptions] = useState<RouteOption[]>([]);
@@ -232,10 +236,26 @@ useEffect(() => {
 
   }, [user]);
 
+  // ─── Starred routes persistence ──────────────
+  useEffect(() => {
+    AsyncStorage.getItem('starredRouteIds').then((val) => {
+      if (val) setStarredRouteIds(JSON.parse(val));
+    });
+  }, []);
+
+  const toggleStarRoute = (routeId: number) => {
+    setStarredRouteIds((prev) => {
+      const next = prev.includes(routeId)
+        ? prev.filter((id) => id !== routeId)
+        : [...prev, routeId];
+      AsyncStorage.setItem('starredRouteIds', JSON.stringify(next));
+      return next;
+    });
+  };
+
   // ─── Real-time posts listener ─────────────────
   useEffect(() => {
     const unsubscribe = onPostsSnapshot((posts) => {
-      console.log('[onPostsSnapshot] received', posts.length, 'posts');
       setDbPosts(posts);
     });
     return () => unsubscribe();
@@ -438,28 +458,21 @@ useEffect(() => {
       .sort((a, b) => b.count - a.count);
   };
 
+  
   if (!region) return null;
 
-  // Compute which routes to display: all routes in any option when in nav mode, else all/none
-  const displayRoutes = (() => {
-    if (navDestination && routeOptions.length > 0) {
-      const allOptionRouteIds = new Set(routeOptions.flatMap((o) => o.routes.map((r) => r.id)));
-      return BUS_ROUTES.filter((r) => allOptionRouteIds.has(r.id));
-    }
-    if (navDestination) return []; // destination set but no options found
-    return showAllRoutes ? BUS_ROUTES : [];
-  })();
+  // IDs of routes in the currently selected option
+  const selectedOptionRouteIds = new Set(selectedOption?.routes.map((r) => r.id) ?? []);
+
+  // IDs of routes that appear in ANY available option (candidate routes)
+  const candidateRouteIds = new Set(routeOptions.flatMap((o) => o.routes.map((r) => r.id)));
+
+  // Always render ALL BUS_ROUTES with stable keys to prevent MapView ghost-polyline bugs.
+  // Visibility (show/hide/highlight) is controlled purely via strokeColor and strokeWidth.
+  const displayRoutes = BUS_ROUTES;
 
   // Show stops only for the routes in the selected option
-  const selectedOptionRouteIds = new Set(selectedOption?.routes.map((r) => r.id) ?? []);
-  const displayStops = (() => {
-    if (!selectedOption) return [];
-    return BUS_STOPS.filter((stop) =>
-      selectedOption.routes.some((route) =>
-        isNearRoute({ latitude: stop.latitude, longitude: stop.longitude }, route.segments, 150)
-      )
-    );
-  })();
+  const displayStops: typeof BUS_STOPS = [];
 
   return (
     <View style={styles.container}>
@@ -495,15 +508,50 @@ useEffect(() => {
           }
         }}
       >
-        {displayRoutes.map((route) => {
-          const hasSelection = selectedOption !== null;
-          const isInOption = selectedOptionRouteIds.has(route.id);
+
+        {displayRoutes.flatMap((route) => {
+          const isCandidate = candidateRouteIds.has(route.id);
+          const isSelected = selectedOptionRouteIds.has(route.id);
+
+          // Visibility rules:
+          //  • No nav mode            → show all routes normally (showAllRoutes toggle)
+          //  • Nav mode, loading      → hide everything (candidateRouteIds empty)
+          //  • Nav mode, no selection → show all candidates at equal weight
+          //  • Nav mode, selection    → highlight selected, hide the rest
+          let strokeColor: string;
+          let strokeWidth: number;
+
+          if (!navDestination) {
+            strokeColor = showAllRoutes ? route.color : 'transparent';
+            strokeWidth = showAllRoutes ? 4 : 0;
+          } else if (selectedOption) {
+            strokeColor = isSelected ? route.color : 'transparent';
+            strokeWidth = isSelected ? 7 : 0;
+          } else if (isCandidate) {
+            strokeColor = route.color;
+            strokeWidth = 5;
+          } else {
+            strokeColor = 'transparent';
+            strokeWidth = 0;
+          }
+
+          // Include a state fingerprint in the key so React Native fully destroys
+          // and recreates the native Polyline view whenever selection changes.
+          // This is required because react-native-maps does not reliably update
+          // strokeColor/strokeWidth on already-mounted native views.
+          const selectionFingerprint = selectedOption
+            ? `sel-${selectedOption.routes.map((r) => r.id).join('-')}`
+            : navDestination
+            ? `cand-${[...candidateRouteIds].sort().join('-')}`
+            : 'normal';
+
           return route.segments.map((segment, segIdx) => (
             <Polyline
-              key={`${route.id}-${segIdx}`}
+              key={`${route.id}-${segIdx}-${selectionFingerprint}`}
               coordinates={segment}
-              strokeColor={!hasSelection || isInOption ? route.color : 'rgba(0,0,0,0.08)'}
-              strokeWidth={isInOption ? 7 : hasSelection ? 2 : navDestination ? 5 : 4}
+              strokeColor={strokeColor}
+              strokeWidth={strokeWidth}
+              zIndex={isSelected ? 2 : 1}
             />
           ));
         })}
@@ -540,21 +588,21 @@ useEffect(() => {
 
         {/* Walking paths: origin → board stop, alight stop → destination */}
         {walkingPaths && (
-          <>
-            <Polyline
-              coordinates={walkingPaths.toBoard}
-              strokeColor="#1565C0"
-              strokeWidth={3}
-              lineDashPattern={[10, 6]}
-            />
-            <Polyline
-              coordinates={walkingPaths.fromAlight}
-              strokeColor="#1565C0"
-              strokeWidth={3}
-              lineDashPattern={[10, 6]}
-            />
-          </>
-        )}
+            <>
+              <Polyline
+                coordinates={walkingPaths.toBoard}
+                strokeColor="#1565C0"
+                strokeWidth={5}
+                lineDashPattern={[12, 4]}
+              />
+              <Polyline
+                coordinates={walkingPaths.fromAlight}
+                strokeColor="#1565C0"
+                strokeWidth={5}
+                lineDashPattern={[12, 4]}
+              />
+            </>
+          )}
       </MapView>
 
       {/* Center pin for pin drop mode */}
@@ -683,6 +731,53 @@ useEffect(() => {
 </Animated.View>
 
 
+      {/* ── Starred Routes Strip (visible when panel is collapsed) ── */}
+      {starredRouteIds.length > 0 && !isOpen && !navDestination && (
+        <Animated.View
+          style={[
+            starStyles.strip,
+            {
+              bottom: COLLAPSED_HEIGHT,
+              opacity: slideAnim.interpolate({
+                inputRange: [0, 0.2],
+                outputRange: [1, 0],
+                extrapolate: 'clamp',
+              }),
+            },
+          ]}
+          pointerEvents="box-none"
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={starStyles.stripContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {starredRouteIds.map((routeId) => {
+              const route = BUS_ROUTES.find((r) => r.id === routeId);
+              if (!route) return null;
+              return (
+                <TouchableOpacity
+                  key={routeId}
+                  style={[starStyles.chip, { borderColor: route.color }]}
+                  onPress={openPanel}
+                  activeOpacity={0.75}
+                >
+                  <View style={[starStyles.chipDot, { backgroundColor: route.color }]} />
+                  <Text style={starStyles.chipText} numberOfLines={1}>{route.name}</Text>
+                  <TouchableOpacity
+                    onPress={() => toggleStarRoute(routeId)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Text style={starStyles.chipStar}>★</Text>
+                  </TouchableOpacity>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </Animated.View>
+      )}
+
 <SearchPanel
         isOpen={isOpen}
         slideAnim={slideAnim}
@@ -716,6 +811,8 @@ useEffect(() => {
         onSelectOption={(opt) => setSelectedOption((prev) => prev?.id === opt.id ? null : opt)}
         routesLoading={routesLoading}
         onArrivalTimeChange={setArrivalTime}
+        starredRouteIds={starredRouteIds}
+        onToggleStarRoute={toggleStarRoute}
       />
 
       <ActionSheet
@@ -1213,4 +1310,51 @@ const popupStyles = StyleSheet.create({
   imageViewerCloseText: { fontSize: 18, color: '#fff', fontWeight: '600' },
   imageCounter: { position: 'absolute', bottom: 60, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
   imageCounterText: { color: '#fff', fontSize: 13, fontWeight: '500' },
+});
+
+const starStyles = StyleSheet.create({
+  strip: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 30,
+    paddingBottom: 8,
+  },
+  stripContent: {
+    paddingHorizontal: 14,
+    gap: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    gap: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.10,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  chipDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+  },
+  chipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#222',
+    maxWidth: 120,
+  },
+  chipStar: {
+    fontSize: 14,
+    color: '#FDD023',
+    lineHeight: 16,
+  },
 });

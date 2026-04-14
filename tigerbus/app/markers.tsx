@@ -1,14 +1,3 @@
-const markers = [
-    {
-        "name" : "BellyFire Studios",
-        "coordinates" : {
-            "latitude": 30.3958078,
-            "longitude": -91.1586212,
-            "latitudeDelta": 0.1,
-            "longitudeDelta": 0.1,
-        },
-    }
+import { BUS_STOPS } from './busStops';
 
-];
-
-export default markers;
+export default BUS_STOPS;
