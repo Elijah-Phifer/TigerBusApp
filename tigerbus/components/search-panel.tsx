@@ -6,7 +6,7 @@
  * Collapsed: shows "Where do you wanna go?" bar (or active trip summary)
  * Expanded:  shows From/To inputs with Nominatim geocoding, then matched routes
  */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -28,6 +28,13 @@ import { useAuth } from '../context/AuthContext';
 import { RouteOption } from '../utils/tripPlanner';
 import { haversineMeters } from '../utils/routeMatching';
 import { BUS_STOPS } from '../app/busStops';
+import { BUS_ROUTES } from '../app/busRouteData';
+import {
+  FILTER_PRESETS,
+  formatFilterHour,
+  getScheduleLabel,
+  routeRunsAtHour,
+} from '../utils/routeSchedule';
  
 export type NavPlace = {
   name: string;
@@ -56,6 +63,7 @@ type SearchPanelProps = {
   onArrivalTimeChange: (time: Date | null) => void;
   starredRouteIds: number[];
   onToggleStarRoute: (routeId: number) => void;
+  onFilteredRouteIdsChange: (ids: number[] | null) => void;
 };
  
 const getInitials = (name: string) =>
@@ -94,6 +102,7 @@ export default function SearchPanel({
   onArrivalTimeChange,
   starredRouteIds,
   onToggleStarRoute,
+  onFilteredRouteIdsChange,
 }: SearchPanelProps) {
   const router = useRouter();
   const { user } = useAuth();
@@ -110,11 +119,43 @@ export default function SearchPanel({
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [pendingTime, setPendingTime] = useState<Date>(new Date());
+
+  // Route time filter (only active when showAllRoutes && no trip)
+  const [filterHour, setFilterHour] = useState<number | null>(null);
+  const [filterLabel, setFilterLabel] = useState<string | null>(null);
+  const [showFilterPicker, setShowFilterPicker] = useState(false);
+  const [pendingFilterTime, setPendingFilterTime] = useState<Date>(new Date());
+
+  const clearFilter = () => { setFilterHour(null); setFilterLabel(null); };
  
   const handleArrivalTimeChange = (selected: Date | null) => {
     setArrivalTime(selected);
     onArrivalTimeChange(selected);
   };
+
+  const onFilteredRouteIdsChangeRef = useRef(onFilteredRouteIdsChange);
+  onFilteredRouteIdsChangeRef.current = onFilteredRouteIdsChange;
+
+  const routeListItems = useMemo(() => {
+    if (filterHour === null) return BUS_ROUTES;
+    return BUS_ROUTES.filter((r) => routeRunsAtHour(r.id, filterHour));
+  }, [filterHour]);
+
+  useEffect(() => {
+    if (filterHour === null) {
+      onFilteredRouteIdsChangeRef.current(null);
+    } else {
+      onFilteredRouteIdsChangeRef.current(routeListItems.map((r) => r.id));
+    }
+  }, [filterHour, routeListItems]);
+
+  useEffect(() => {
+    if (!showAllRoutes) clearFilter();
+  }, [showAllRoutes]);
+
+  useEffect(() => {
+    if (!isOpen) setEditingField(null);
+  }, [isOpen]);
  
   const formatArrivalTime = (d: Date) =>
     d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -177,6 +218,7 @@ export default function SearchPanel({
   const handleToTextChange = (text: string) => {
     setToText(text);
     if (navDestination) onSetDestination(null); // clear confirmed dest on edit
+    if (text.length > 0 && filterHour !== null) clearFilter();
     triggerGeoSearch(text);
   };
  
@@ -335,6 +377,7 @@ export default function SearchPanel({
                   setEditingField('to');
                   setTimeout(() => toInputRef.current?.focus(), 50);
                 }}
+                onBlur={() => { if (!fromText && !navOrigin) setEditingField(null); }}
               />
             ) : (
               <Pressable
@@ -380,9 +423,16 @@ export default function SearchPanel({
               placeholderTextColor="#aaa"
               returnKeyType="search"
               onFocus={() => { setEditingField('to'); onOpen(); }}
+              onBlur={() => { if (!toText && !navDestination) setEditingField(null); }}
             />
             {toText.length > 0 && (
-              <Pressable onPress={() => { setToText(''); setGeoResults([]); onSetDestination(null); }}>
+              <Pressable onPress={() => {
+                setToText('');
+                setGeoResults([]);
+                onSetDestination(null);
+                setEditingField(null);
+                Keyboard.dismiss();
+              }}>
                 <Text style={styles.rowClear}>✕</Text>
               </Pressable>
             )}
@@ -474,6 +524,55 @@ export default function SearchPanel({
         </Modal>
       )}
  
+      {/* ── Filter time picker ── */}
+      {Platform.OS === 'android' ? (
+        showFilterPicker && (
+          <DateTimePicker
+            value={pendingFilterTime}
+            mode="time"
+            display="clock"
+            onChange={(event, d) => {
+              setShowFilterPicker(false);
+              if (event.type === 'set' && d) {
+                setFilterHour(d.getHours());
+                setFilterLabel('Custom');
+              }
+            }}
+          />
+        )
+      ) : (
+        <Modal
+          visible={showFilterPicker}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowFilterPicker(false)}
+        >
+          <View style={styles.pickerBackdrop}>
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowFilterPicker(false)} />
+            <View style={styles.pickerCard}>
+              <Text style={styles.pickerTitle}>Filter by time</Text>
+              <DateTimePicker
+                value={pendingFilterTime}
+                mode="time"
+                display="spinner"
+                themeVariant="light"
+                onChange={(_, d) => { if (d) setPendingFilterTime(d); }}
+              />
+              <Pressable
+                style={styles.pickerNext}
+                onPress={() => {
+                  setFilterHour(pendingFilterTime.getHours());
+                  setFilterLabel('Custom');
+                  setShowFilterPicker(false);
+                }}
+              >
+                <Text style={styles.pickerNextText}>Apply</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+      )}
+
       {/* ── Expanded content ── */}
       <Animated.View
         style={[
@@ -639,12 +738,84 @@ export default function SearchPanel({
               </View>
             )
           ) : !isEditing ? (
-            <View style={styles.hintBox}>
-              <Text style={styles.hintIcon}>🐯</Text>
-              <Text style={styles.hintText}>
-                Type a destination to find which Tiger Trails routes can get you there.
-              </Text>
-            </View>
+            showAllRoutes ? (
+              <>
+                {/* Time filter chips */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.filterChipsScroll}
+                  contentContainerStyle={styles.filterChipsContent}
+                >
+                  {FILTER_PRESETS.map((preset) => {
+                    const isActive = filterLabel === preset.label;
+                    return (
+                      <Pressable
+                        key={preset.label}
+                        style={[styles.filterChip, isActive && styles.filterChipActive]}
+                        onPress={() => {
+                          const hour = preset.hour !== null ? preset.hour : new Date().getHours();
+                          setFilterHour(hour);
+                          setFilterLabel(preset.label);
+                        }}
+                      >
+                        <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
+                          {preset.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                  <Pressable
+                    style={[styles.filterChip, filterLabel === 'Custom' && styles.filterChipActive]}
+                    onPress={() => {
+                      const d = new Date();
+                      if (filterHour !== null) d.setHours(filterHour, 0, 0, 0);
+                      setPendingFilterTime(d);
+                      setShowFilterPicker(true);
+                    }}
+                  >
+                    <Text style={[styles.filterChipText, filterLabel === 'Custom' && styles.filterChipTextActive]}>
+                      {filterLabel === 'Custom' && filterHour !== null
+                        ? formatFilterHour(filterHour)
+                        : 'Custom…'}
+                    </Text>
+                  </Pressable>
+                  {filterHour !== null && (
+                    <Pressable style={styles.filterClearChip} onPress={clearFilter}>
+                      <Text style={styles.filterClearText}>✕ Clear</Text>
+                    </Pressable>
+                  )}
+                </ScrollView>
+
+                {/* Route list */}
+                <Text style={styles.sectionLabel}>
+                  {filterHour !== null
+                    ? `${routeListItems.length} route${routeListItems.length !== 1 ? 's' : ''} at ${filterLabel === 'Custom' ? formatFilterHour(filterHour) : filterLabel}`
+                    : `All ${routeListItems.length} routes`}
+                </Text>
+                {routeListItems.map((route) => (
+                  <View key={route.id} style={styles.routeListItem}>
+                    <View style={[styles.routeListDot, { backgroundColor: route.color }]} />
+                    <Text style={styles.routeListName} numberOfLines={1}>{route.name}</Text>
+                    <Text style={styles.routeListHours}>{getScheduleLabel(route.id)}</Text>
+                  </View>
+                ))}
+                {filterHour !== null && routeListItems.length === 0 && (
+                  <View style={styles.noRoutesBox}>
+                    <Text style={styles.noRoutesIcon}>🌙</Text>
+                    <Text style={styles.noRoutesTitle}>No routes at this time</Text>
+                    <Text style={styles.noRoutesSubtitle}>Try a different time or clear the filter.</Text>
+                  </View>
+                )}
+              </>
+            ) : (
+              <View style={styles.hintBox}>
+                <Text style={styles.hintIcon}>🐯</Text>
+                <Text style={styles.hintText}>
+                  Type a destination to find which Tiger Trails routes can get you there.
+                </Text>
+              </View>
+            )
           ) : null}
         </ScrollView>
  
@@ -1224,6 +1395,76 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
  
+  // ── Route filter chips ─────────────────────────
+  filterChipsScroll: {
+    marginBottom: 6,
+  },
+  filterChipsContent: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: '#f0f0f0',
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+  },
+  filterChipActive: {
+    backgroundColor: '#1565C0',
+    borderColor: '#1565C0',
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#444',
+  },
+  filterChipTextActive: {
+    color: '#fff',
+  },
+  filterClearChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1.5,
+    borderColor: '#FECACA',
+  },
+  filterClearText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#E53935',
+  },
+
+  // ── Route list ─────────────────────────────────
+  routeListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  routeListDot: {
+    width: 11,
+    height: 11,
+    borderRadius: 6,
+    flexShrink: 0,
+  },
+  routeListName: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#222',
+  },
+  routeListHours: {
+    fontSize: 12,
+    color: '#888',
+    fontWeight: '500',
+  },
+
   // ── Nav modal ──────────────────────────────────
   navModalBackdrop: {
     flex: 1,

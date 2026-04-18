@@ -91,6 +91,7 @@ const [region, setRegion] = useState<Region | null>(null);
   const [walkingPaths, setWalkingPaths] = useState<WalkingPaths | null>(null);
   const [routesLoading, setRoutesLoading] = useState(false);
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
+  const [filteredRouteIds, setFilteredRouteIds] = useState<number[] | null>(null);
   // Stable GPS coords — only set once on first location fix, not updated on map pan
   const userCoordsRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const [pinDropCancelPressed, setPinDropCancelPressed] = useState(false);
@@ -522,8 +523,16 @@ useEffect(() => {
           let strokeWidth: number;
 
           if (!navDestination) {
-            strokeColor = showAllRoutes ? route.color : 'transparent';
-            strokeWidth = showAllRoutes ? 4 : 0;
+            if (!showAllRoutes) {
+              strokeColor = 'transparent';
+              strokeWidth = 0;
+            } else if (filteredRouteIds !== null && !filteredRouteIds.includes(route.id)) {
+              strokeColor = 'transparent';
+              strokeWidth = 0;
+            } else {
+              strokeColor = route.color;
+              strokeWidth = 4;
+            }
           } else if (selectedOption) {
             strokeColor = isSelected ? route.color : 'transparent';
             strokeWidth = isSelected ? 7 : 0;
@@ -543,6 +552,8 @@ useEffect(() => {
             ? `sel-${selectedOption.routes.map((r) => r.id).join('-')}`
             : navDestination
             ? `cand-${[...candidateRouteIds].sort().join('-')}`
+            : filteredRouteIds !== null
+            ? `filter-${[...filteredRouteIds].sort().join('-')}`
             : 'normal';
 
           return route.segments.map((segment, segIdx) => (
@@ -813,6 +824,7 @@ useEffect(() => {
         onArrivalTimeChange={setArrivalTime}
         starredRouteIds={starredRouteIds}
         onToggleStarRoute={toggleStarRoute}
+        onFilteredRouteIdsChange={setFilteredRouteIds}
       />
 
       <ActionSheet
