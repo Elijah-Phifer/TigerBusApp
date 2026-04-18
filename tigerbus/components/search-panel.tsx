@@ -24,10 +24,9 @@ import {
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../context/AuthContext';
 import { RouteOption } from '../utils/tripPlanner';
-import { haversineMeters } from '../utils/routeMatching';
-import { BUS_STOPS } from '../app/busStops';
 import { BUS_ROUTES } from '../app/busRouteData';
 import {
   FILTER_PRESETS,
@@ -68,18 +67,34 @@ type SearchPanelProps = {
  
 const getInitials = (name: string) =>
   name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
- 
-function fetchPlaces(query: string): NavPlace[] {
+
+// Baton Rouge / LSU service area bounding box
+const LSU_VIEWBOX = '-91.25,30.35,-91.10,30.50';
+
+async function fetchPlaces(query: string): Promise<NavPlace[]> {
   if (query.trim().length < 2) return [];
-  const q = query.trim().toLowerCase();
-  return BUS_STOPS
-    .filter((stop) => stop.name.toLowerCase().includes(q))
-    .slice(0, 6)
-    .map((stop) => ({
-      name: stop.name,
-      latitude: stop.latitude,
-      longitude: stop.longitude,
-    }));
+  try {
+    const q = encodeURIComponent(query.trim());
+    const url =
+      `https://nominatim.openstreetmap.org/search` +
+      `?q=${q}&format=json&limit=7&addressdetails=0&dedupe=1` +
+      `&viewbox=${LSU_VIEWBOX}&bounded=1`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'TigerBusApp/1.0' } });
+    const data: any[] = await res.json();
+    return data.map((item) => {
+      const parts = (item.display_name as string).split(', ');
+      const name = parts.length > 1
+        ? `${parts[0]}, ${parts[1]}`
+        : parts[0];
+      return {
+        name,
+        latitude: parseFloat(item.lat),
+        longitude: parseFloat(item.lon),
+      };
+    });
+  } catch {
+    return [];
+  }
 }
  
 export default function SearchPanel({
@@ -160,21 +175,8 @@ export default function SearchPanel({
   const formatArrivalTime = (d: Date) =>
     d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
  
-  /** Estimate bus ride time in minutes between two stops using haversine + winding factor */
-  const estimateBusMins = (opt: RouteOption): number => {
-    const dist = haversineMeters(opt.boardStop, opt.alightStop);
-    // 20 km/h average bus speed = 333 m/min; 1.5x for route winding
-    return Math.ceil((dist * 1.5) / 333);
-  };
- 
-  /** Compute "leave by" time given a desired arrival time */
-  const computeLeaveBy = (opt: RouteOption, arrival: Date): Date => {
-    const totalMins =
-      Math.ceil(opt.walkToBoard / 80) +
-      estimateBusMins(opt) +
-      Math.ceil(opt.walkFromAlight / 80);
-    return new Date(arrival.getTime() - totalMins * 60 * 1000);
-  };
+  const computeLeaveBy = (opt: RouteOption, arrival: Date): Date =>
+    new Date(arrival.getTime() - opt.estimatedMinutes * 60 * 1000);
  
   const formatTime = (d: Date) =>
     d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -210,9 +212,13 @@ export default function SearchPanel({
   // ─── Geocoding helpers ──────────────────────────
   const triggerGeoSearch = (text: string) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (text.trim().length < 2) { setGeoResults([]); return; }
-    const results = fetchPlaces(text);
-    setGeoResults(results);
+    if (text.trim().length < 2) { setGeoResults([]); setIsLoadingGeo(false); return; }
+    setIsLoadingGeo(true);
+    debounceRef.current = setTimeout(async () => {
+      const results = await fetchPlaces(text);
+      setGeoResults(results);
+      setIsLoadingGeo(false);
+    }, 350);
   };
  
   const handleToTextChange = (text: string) => {
@@ -228,6 +234,16 @@ export default function SearchPanel({
     triggerGeoSearch(text);
   };
  
+  const saveSearchHistory = async (destination: string) => {
+    try {
+      const raw = await AsyncStorage.getItem('searchHistory');
+      const history: { destination: string; timestamp: number }[] = raw ? JSON.parse(raw) : [];
+      const deduped = history.filter((h) => h.destination !== destination);
+      const updated = [{ destination, timestamp: Date.now() }, ...deduped].slice(0, 20);
+      await AsyncStorage.setItem('searchHistory', JSON.stringify(updated));
+    } catch {}
+  };
+
   const handleSelectPlace = (place: NavPlace) => {
     setGeoResults([]);
     Keyboard.dismiss();
@@ -235,12 +251,12 @@ export default function SearchPanel({
       setToText(place.name);
       setEditingField(null);
       onSetDestination(place);
+      saveSearchHistory(place.name);
       onClose();
     } else if (editingField === 'from') {
       setFromText(place.name);
       setEditingField(null);
       onSetOrigin(place);
-      // If destination is already set keep panel open; otherwise close
       if (!navDestination) setEditingField('to');
     }
   };
@@ -618,7 +634,7 @@ export default function SearchPanel({
             ) : routeOptions.length > 0 ? (
               <>
                 <Text style={styles.sectionLabel}>
-                  {routeOptions.length} option{routeOptions.length !== 1 ? 's' : ''} found
+                  {routeOptions.length} option{routeOptions.length !== 1 ? 's' : ''} · fastest first
                   {arrivalTime ? ` · arrive by ${formatArrivalTime(arrivalTime)}` : ''}
                 </Text>
                 {routeOptions.map((opt) => {
@@ -675,6 +691,10 @@ export default function SearchPanel({
  
                       {/* Badges */}
                       <View style={styles.optionBadgeWrap}>
+                        {/* Estimated total time — primary ranking signal */}
+                        <View style={styles.estTimeBadge}>
+                          <Text style={styles.estTimeText}>~{opt.estimatedMinutes} min</Text>
+                        </View>
                         <View style={[styles.optionBadge, { backgroundColor: opt.type === 'direct' ? '#e8f5e9' : '#fff8e1' }]}>
                           <Text style={[styles.optionBadgeText, { color: opt.type === 'direct' ? '#2e7d32' : '#f57f17' }]}>
                             {opt.type === 'direct' ? 'Direct' : '1 Transfer'}
@@ -689,6 +709,7 @@ export default function SearchPanel({
                         {opt.nextBusSeconds !== undefined && !leaveBy && (
                           <View style={styles.nextBusBadge}>
                             <Text style={styles.nextBusBadgeText}>
+                              Next:{' '}
                               {opt.nextBusSeconds < 60
                                 ? `${opt.nextBusSeconds}s`
                                 : `${Math.ceil(opt.nextBusSeconds / 60)}min`}
@@ -1117,6 +1138,17 @@ const styles = StyleSheet.create({
   optionBadgeWrap: {
     alignItems: 'flex-end',
     gap: 4,
+  },
+  estTimeBadge: {
+    backgroundColor: '#1565C0',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  estTimeText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#fff',
   },
   optionBadge: {
     paddingHorizontal: 8,

@@ -62,21 +62,48 @@ const ROUTE_STOPS: Map<number, UniqueStop[]> = new Map(
 export type RouteOption = {
   id: string;
   type: 'direct' | 'transfer';
-  /** The route(s) involved — 1 for direct, 2 for single transfer */
   routes: BusRoute[];
-  /** Stop nearest to origin where the user boards the first route */
   boardStop: UniqueStop;
-  /** Stop where user switches routes (transfer only) */
   transferStop?: UniqueStop;
-  /** Stop nearest to destination where user exits the last route */
   alightStop: UniqueStop;
-  /** Walking distance in meters from origin to board stop */
   walkToBoard: number;
-  /** Walking distance in meters from alight stop to destination */
   walkFromAlight: number;
-  /** Seconds until next bus on the first route (if live data available) */
   nextBusSeconds?: number;
+  /** Total estimated trip time in minutes (walk + wait + ride) */
+  estimatedMinutes: number;
 };
+
+const WALK_SPEED = 80;   // m/min ≈ 4.8 km/h
+const BUS_SPEED  = 333;  // m/min ≈ 20 km/h
+const BUS_WIND   = 1.5;  // route winding factor
+const DEFAULT_WAIT_MIN   = 5;
+const TRANSFER_WAIT_MIN  = 4;
+
+function calcEstimatedMinutes(
+  walkToBoard: number,
+  boardStop: GeoPoint,
+  transferStop: GeoPoint | undefined,
+  alightStop: GeoPoint,
+  walkFromAlight: number,
+  type: 'direct' | 'transfer',
+  nextBusSeconds?: number,
+): number {
+  const walkToMin     = walkToBoard / WALK_SPEED;
+  const waitMin       = nextBusSeconds !== undefined ? nextBusSeconds / 60 : DEFAULT_WAIT_MIN;
+  const walkFromMin   = walkFromAlight / WALK_SPEED;
+
+  let rideMin: number;
+  if (type === 'direct' || !transferStop) {
+    rideMin = haversineMeters(boardStop, alightStop) * BUS_WIND / BUS_SPEED;
+  } else {
+    rideMin =
+      haversineMeters(boardStop, transferStop) * BUS_WIND / BUS_SPEED +
+      TRANSFER_WAIT_MIN +
+      haversineMeters(transferStop, alightStop) * BUS_WIND / BUS_SPEED;
+  }
+
+  return Math.ceil(walkToMin + waitMin + rideMin + walkFromMin);
+}
 
 /**
  * Given an origin and destination, returns the top 2-3 transit options ranked
@@ -119,14 +146,17 @@ export function findRouteOptions(
 
     const board = closestStop(boardable, origin);
     const alight = closestStop(alightable, destination);
+    const walkToBoard = haversineMeters(board, origin);
+    const walkFromAlight = haversineMeters(alight, destination);
     options.push({
       id: optId,
       type: 'direct',
       routes: [route],
       boardStop: board,
       alightStop: alight,
-      walkToBoard: haversineMeters(board, origin),
-      walkFromAlight: haversineMeters(alight, destination),
+      walkToBoard,
+      walkFromAlight,
+      estimatedMinutes: calcEstimatedMinutes(walkToBoard, board, undefined, alight, walkFromAlight, 'direct'),
     });
   }
 
@@ -170,16 +200,20 @@ export function findRouteOptions(
 
         const board = closestStop(boardable, origin);
         const alight = closestStop(alightable, destination);
+        const transfer = closestStop(transferCandidates, mid);
+        const walkToBoard = haversineMeters(board, origin);
+        const walkFromAlight = haversineMeters(alight, destination);
         seen.add(optId);
         options.push({
           id: optId,
           type: 'transfer',
           routes: [r1, r2],
           boardStop: board,
-          transferStop: closestStop(transferCandidates, mid),
+          transferStop: transfer,
           alightStop: alight,
-          walkToBoard: haversineMeters(board, origin),
-          walkFromAlight: haversineMeters(alight, destination),
+          walkToBoard,
+          walkFromAlight,
+          estimatedMinutes: calcEstimatedMinutes(walkToBoard, board, transfer, alight, walkFromAlight, 'transfer'),
         });
 
         if (options.filter((o) => o.type === 'transfer').length >= 2) break;
@@ -188,21 +222,22 @@ export function findRouteOptions(
     }
   }
 
-  // Attach next-bus seconds from live arrival data
+  // Attach next-bus seconds and recompute estimatedMinutes with live wait time
   if (activeRouteData) {
     for (const opt of options) {
       const entry = activeRouteData.arrivals.get(opt.routes[0].id);
       if (entry && entry.times.length > 0) {
         opt.nextBusSeconds = entry.times[0].seconds;
+        opt.estimatedMinutes = calcEstimatedMinutes(
+          opt.walkToBoard, opt.boardStop, opt.transferStop, opt.alightStop,
+          opt.walkFromAlight, opt.type, opt.nextBusSeconds,
+        );
       }
     }
   }
 
-  // Sort: direct before transfer, then by walking distance to board stop
-  options.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'direct' ? -1 : 1;
-    return a.walkToBoard - b.walkToBoard;
-  });
+  // Sort by total estimated time ascending
+  options.sort((a, b) => a.estimatedMinutes - b.estimatedMinutes);
 
   // Cap: up to 3 total, prioritizing directs
   const directs = options.filter((o) => o.type === 'direct').slice(0, 3);
