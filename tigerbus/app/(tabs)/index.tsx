@@ -32,10 +32,11 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import "../../global.css";
 import { BUS_ROUTES } from '../busRouteData';
 import { BUS_STOPS } from '../busStops';
-import SearchPanel, { NavPlace } from '../../components/search-panel';
+import SearchPanel, { NavPlace, FavoriteTrip } from '../../components/search-panel';
 import { isNearRoute } from '../../utils/routeMatching';
 import { findRouteOptions, RouteOption, fetchWalkingPath, WalkingPaths } from '../../utils/tripPlanner';
 import { fetchActiveRoutes } from '../../utils/transitSchedule';
+import { fetchLiveVehicles, VehiclePosition } from '../../utils/liveVehicles';
 import {
   getReactions, addCheckin, onPostsSnapshot,
   savePlace, unsavePlace, getSavedPlaces,
@@ -83,7 +84,7 @@ const [region, setRegion] = useState<Region | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [showAllRoutes, setShowAllRoutes] = useState(true);
-  const [starredRouteIds, setStarredRouteIds] = useState<number[]>([]);
+  const [favoriteTrips, setFavoriteTrips] = useState<FavoriteTrip[]>([]);
   const [navDestination, setNavDestination] = useState<NavPlace | null>(null);
   const [navOrigin, setNavOrigin] = useState<NavPlace | null>(null);
   const [routeOptions, setRouteOptions] = useState<RouteOption[]>([]);
@@ -92,8 +93,11 @@ const [region, setRegion] = useState<Region | null>(null);
   const [routesLoading, setRoutesLoading] = useState(false);
   const [arrivalTime, setArrivalTime] = useState<Date | null>(null);
   const [filteredRouteIds, setFilteredRouteIds] = useState<number[] | null>(null);
+  const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
   // Stable GPS coords — only set once on first location fix, not updated on map pan
   const userCoordsRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  // Option ID to auto-select after route options recompute (used when restoring a favorite)
+  const pendingOptionIdRef = useRef<string | null>(null);
   const [pinDropCancelPressed, setPinDropCancelPressed] = useState(false);
   const [pinDropConfirmPressed, setPinDropConfirmPressed] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -200,6 +204,11 @@ useEffect(() => {
       if (!cancelled) {
         setRouteOptions(opts);
         setRoutesLoading(false);
+        if (pendingOptionIdRef.current) {
+          const match = opts.find((o) => o.id === pendingOptionIdRef.current);
+          if (match) setSelectedOption(match);
+          pendingOptionIdRef.current = null;
+        }
       }
     })();
 
@@ -208,11 +217,11 @@ useEffect(() => {
 
   // ─── Fetch walking paths when an option is selected ──
   useEffect(() => {
-    if (!selectedOption || !navDestination || !region) {
+    if (!selectedOption || !navDestination) {
       setWalkingPaths(null);
       return;
     }
-    const origin = navOrigin ?? { latitude: region.latitude, longitude: region.longitude };
+    const origin = navOrigin ?? userCoordsRef.current ?? { latitude: 30.412, longitude: -91.18 };
     let cancelled = false;
     (async () => {
       const [toBoard, fromAlight] = await Promise.all([
@@ -237,22 +246,43 @@ useEffect(() => {
 
   }, [user]);
 
-  // ─── Starred routes persistence ──────────────
+  // ─── Favorite trips persistence ───────────────
   useEffect(() => {
-    AsyncStorage.getItem('starredRouteIds').then((val) => {
-      if (val) setStarredRouteIds(JSON.parse(val));
+    AsyncStorage.getItem('favoriteTrips').then((val) => {
+      if (val) setFavoriteTrips(JSON.parse(val));
     });
   }, []);
 
-  const toggleStarRoute = (routeId: number) => {
-    setStarredRouteIds((prev) => {
-      const next = prev.includes(routeId)
-        ? prev.filter((id) => id !== routeId)
-        : [...prev, routeId];
-      AsyncStorage.setItem('starredRouteIds', JSON.stringify(next));
+  const toggleFavoriteTrip = (trip: FavoriteTrip) => {
+    setFavoriteTrips((prev) => {
+      const exists = prev.some((f) => f.id === trip.id && f.destination.name === trip.destination.name);
+      const next = exists
+        ? prev.filter((f) => !(f.id === trip.id && f.destination.name === trip.destination.name))
+        : [...prev, trip];
+      AsyncStorage.setItem('favoriteTrips', JSON.stringify(next));
       return next;
     });
   };
+
+  const handleRestoreFavorite = (fav: FavoriteTrip) => {
+    pendingOptionIdRef.current = fav.id;
+    setNavOrigin(fav.origin);
+    setNavDestination(fav.destination);
+    setSelectedOption(null);
+    openPanel();
+  };
+
+  // ─── Live vehicle positions (poll every 15 s) ──
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      const vehicles = await fetchLiveVehicles();
+      if (!cancelled) setVehiclePositions(vehicles);
+    };
+    refresh();
+    const interval = setInterval(refresh, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
 
   // ─── Real-time posts listener ─────────────────
   useEffect(() => {
@@ -482,6 +512,7 @@ useEffect(() => {
         style={styles.map}
         initialRegion={region}
         showsUserLocation
+        showsPointsOfInterest={false}
         onRegionChangeComplete={(r) => {
           if (pinDropMode && region) {
             // Limit pin drop to 100 mile radius from user's location
@@ -597,6 +628,50 @@ useEffect(() => {
           </Marker>
         ))}
 
+        {/* Board / alight / transfer stop pins — only when a route is selected */}
+        {selectedOption && (
+          <>
+            <Marker
+              coordinate={selectedOption.boardStop}
+              anchor={{ x: 0.5, y: 1 }}
+              tracksViewChanges={false}
+            >
+              <View style={stopPinStyles.pin}>
+                <View style={[stopPinStyles.bubble, { backgroundColor: '#1565C0' }]}>
+                  <Text style={stopPinStyles.label}>Board</Text>
+                </View>
+                <View style={[stopPinStyles.tail, { borderTopColor: '#1565C0' }]} />
+              </View>
+            </Marker>
+            {selectedOption.transferStop && (
+              <Marker
+                coordinate={selectedOption.transferStop}
+                anchor={{ x: 0.5, y: 1 }}
+                tracksViewChanges={false}
+              >
+                <View style={stopPinStyles.pin}>
+                  <View style={[stopPinStyles.bubble, { backgroundColor: '#F57F17' }]}>
+                    <Text style={stopPinStyles.label}>Transfer</Text>
+                  </View>
+                  <View style={[stopPinStyles.tail, { borderTopColor: '#F57F17' }]} />
+                </View>
+              </Marker>
+            )}
+            <Marker
+              coordinate={selectedOption.alightStop}
+              anchor={{ x: 0.5, y: 1 }}
+              tracksViewChanges={false}
+            >
+              <View style={stopPinStyles.pin}>
+                <View style={[stopPinStyles.bubble, { backgroundColor: '#2E7D32' }]}>
+                  <Text style={stopPinStyles.label}>Get off</Text>
+                </View>
+                <View style={[stopPinStyles.tail, { borderTopColor: '#2E7D32' }]} />
+              </View>
+            </Marker>
+          </>
+        )}
+
         {/* Walking paths: origin → board stop, alight stop → destination */}
         {walkingPaths && (
             <>
@@ -614,6 +689,7 @@ useEffect(() => {
               />
             </>
           )}
+
       </MapView>
 
       {/* Center pin for pin drop mode */}
@@ -742,8 +818,8 @@ useEffect(() => {
 </Animated.View>
 
 
-      {/* ── Starred Routes Strip (visible when panel is collapsed) ── */}
-      {starredRouteIds.length > 0 && !isOpen && !navDestination && (
+      {/* ── Favorite Trips Strip (visible when panel is collapsed) ── */}
+      {favoriteTrips.length > 0 && !isOpen && !navDestination && (
         <Animated.View
           style={[
             starStyles.strip,
@@ -764,20 +840,20 @@ useEffect(() => {
             contentContainerStyle={starStyles.stripContent}
             keyboardShouldPersistTaps="handled"
           >
-            {starredRouteIds.map((routeId) => {
-              const route = BUS_ROUTES.find((r) => r.id === routeId);
-              if (!route) return null;
+            {favoriteTrips.map((fav) => {
+              const primaryRoute = BUS_ROUTES.find((r) => r.id === fav.routeIds[0]);
+              if (!primaryRoute) return null;
               return (
                 <TouchableOpacity
-                  key={routeId}
-                  style={[starStyles.chip, { borderColor: route.color }]}
-                  onPress={openPanel}
+                  key={`${fav.id}-${fav.destination.name}`}
+                  style={[starStyles.chip, { borderColor: primaryRoute.color }]}
+                  onPress={() => handleRestoreFavorite(fav)}
                   activeOpacity={0.75}
                 >
-                  <View style={[starStyles.chipDot, { backgroundColor: route.color }]} />
-                  <Text style={starStyles.chipText} numberOfLines={1}>{route.name}</Text>
+                  <View style={[starStyles.chipDot, { backgroundColor: primaryRoute.color }]} />
+                  <Text style={starStyles.chipText} numberOfLines={1}>{fav.destination.name}</Text>
                   <TouchableOpacity
-                    onPress={() => toggleStarRoute(routeId)}
+                    onPress={() => toggleFavoriteTrip(fav)}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
                     <Text style={starStyles.chipStar}>★</Text>
@@ -822,9 +898,10 @@ useEffect(() => {
         onSelectOption={(opt) => setSelectedOption((prev) => prev?.id === opt.id ? null : opt)}
         routesLoading={routesLoading}
         onArrivalTimeChange={setArrivalTime}
-        starredRouteIds={starredRouteIds}
-        onToggleStarRoute={toggleStarRoute}
+        favoriteTrips={favoriteTrips}
+        onToggleFavoriteTrip={toggleFavoriteTrip}
         onFilteredRouteIdsChange={setFilteredRouteIds}
+        vehiclePositions={vehiclePositions}
       />
 
       <ActionSheet
@@ -1322,6 +1399,34 @@ const popupStyles = StyleSheet.create({
   imageViewerCloseText: { fontSize: 18, color: '#fff', fontWeight: '600' },
   imageCounter: { position: 'absolute', bottom: 60, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
   imageCounterText: { color: '#fff', fontSize: 13, fontWeight: '500' },
+});
+
+
+const stopPinStyles = StyleSheet.create({
+  pin: { alignItems: 'center' },
+  bubble: {
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  label: { fontSize: 11, fontWeight: '800', color: '#fff' },
+  tail: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 5,
+    borderRightWidth: 5,
+    borderTopWidth: 7,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    marginTop: -1,
+  },
 });
 
 const starStyles = StyleSheet.create({

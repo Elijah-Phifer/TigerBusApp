@@ -27,6 +27,7 @@ import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../context/AuthContext';
 import { RouteOption } from '../utils/tripPlanner';
+import { VehiclePosition, getVehicleInfoForBoardStop } from '../utils/liveVehicles';
 import { BUS_ROUTES } from '../app/busRouteData';
 import {
   FILTER_PRESETS,
@@ -39,6 +40,14 @@ export type NavPlace = {
   name: string;
   latitude: number;
   longitude: number;
+};
+
+export type FavoriteTrip = {
+  id: string;          // == RouteOption.id, e.g. "direct-5"
+  destination: NavPlace;
+  origin: NavPlace | null;  // null = user GPS location
+  routeIds: number[];
+  estimatedMinutes: number;
 };
  
 type SearchPanelProps = {
@@ -60,9 +69,10 @@ type SearchPanelProps = {
   onSelectOption: (opt: RouteOption) => void; // toggle: tapping same option deselects
   routesLoading: boolean;            // true while fetching active routes
   onArrivalTimeChange: (time: Date | null) => void;
-  starredRouteIds: number[];
-  onToggleStarRoute: (routeId: number) => void;
+  favoriteTrips: FavoriteTrip[];
+  onToggleFavoriteTrip: (trip: FavoriteTrip) => void;
   onFilteredRouteIdsChange: (ids: number[] | null) => void;
+  vehiclePositions: VehiclePosition[];
 };
  
 const getInitials = (name: string) =>
@@ -115,9 +125,10 @@ export default function SearchPanel({
   onSelectOption,
   routesLoading,
   onArrivalTimeChange,
-  starredRouteIds,
-  onToggleStarRoute,
+  favoriteTrips,
+  onToggleFavoriteTrip,
   onFilteredRouteIdsChange,
+  vehiclePositions,
 }: SearchPanelProps) {
   const router = useRouter();
   const { user } = useAuth();
@@ -695,7 +706,7 @@ export default function SearchPanel({
                         <View style={styles.estTimeBadge}>
                           <Text style={styles.estTimeText}>~{opt.estimatedMinutes} min</Text>
                         </View>
-                        <View style={[styles.optionBadge, { backgroundColor: opt.type === 'direct' ? '#e8f5e9' : '#fff8e1' }]}>
+<View style={[styles.optionBadge, { backgroundColor: opt.type === 'direct' ? '#e8f5e9' : '#fff8e1' }]}>
                           <Text style={[styles.optionBadgeText, { color: opt.type === 'direct' ? '#2e7d32' : '#f57f17' }]}>
                             {opt.type === 'direct' ? 'Direct' : '1 Transfer'}
                           </Text>
@@ -716,31 +727,56 @@ export default function SearchPanel({
                             </Text>
                           </View>
                         )}
-                        {isSelected && (
-                          <>
-                            <Text style={styles.optionShowingTag}>Showing</Text>
-                            <Pressable
-                              style={styles.letsGoBtn}
-                              onPress={() => setNavStarted(true)}
-                            >
-                              <Text style={styles.letsGoBtnText}>Let's Go →</Text>
-                            </Pressable>
-                          </>
-                        )}
+                        {isSelected && (() => {
+                          const info = getVehicleInfoForBoardStop(
+                            vehiclePositions, opt.routes[0].id, opt.boardStop,
+                          );
+                          return (
+                            <>
+                              <Text style={styles.optionShowingTag}>Showing on map</Text>
+                              {info && (
+                                <View style={styles.busInfoRow}>
+                                  <View style={[styles.capacityBadge, { backgroundColor: info.capacityBg }]}>
+                                    <Text style={[styles.capacityText, { color: info.capacityFg }]}>
+                                      {info.capacityText}
+                                    </Text>
+                                  </View>
+                                  <View style={styles.etaBadge}>
+                                    <Text style={styles.etaLabel}>Bus arriving</Text>
+                                    <Text style={styles.etaValue}>~{info.etaMinutes} min</Text>
+                                  </View>
+                                </View>
+                              )}
+                              <Pressable
+                                style={styles.letsGoBtn}
+                                onPress={() => setNavStarted(true)}
+                              >
+                                <Text style={styles.letsGoBtnText}>Let's Go →</Text>
+                              </Pressable>
+                            </>
+                          );
+                        })()}
                       </View>
  
-                      {/* Star button — saves route to home screen strip */}
+                      {/* Star button — saves full trip to home screen */}
                       <Pressable
                         style={styles.starBtn}
                         onPress={(e) => {
                           e.stopPropagation?.();
-                          opt.routes.forEach((r) => onToggleStarRoute(r.id));
+                          if (!navDestination) return;
+                          onToggleFavoriteTrip({
+                            id: opt.id,
+                            destination: navDestination,
+                            origin: navOrigin,
+                            routeIds: opt.routes.map((r) => r.id),
+                            estimatedMinutes: opt.estimatedMinutes,
+                          });
                         }}
                         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         <Text style={[
                           styles.starIcon,
-                          opt.routes.some((r) => starredRouteIds.includes(r.id)) && styles.starIconActive,
+                          favoriteTrips.some((f) => f.id === opt.id && f.destination.name === navDestination?.name) && styles.starIconActive,
                         ]}>
                           ★
                         </Text>
@@ -1150,7 +1186,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#fff',
   },
-  optionBadge: {
+optionBadge: {
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 8,
@@ -1412,6 +1448,42 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
  
+  // ── Bus ETA / capacity (selected card) ────────
+  busInfoRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 2,
+    alignItems: 'center',
+  },
+  capacityBadge: {
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  capacityText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  etaBadge: {
+    backgroundColor: '#F3F4F6',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+  etaLabel: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: '#888',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  etaValue: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#111',
+  },
+
   // ── Let's Go button ────────────────────────────
   letsGoBtn: {
     backgroundColor: '#1565C0',

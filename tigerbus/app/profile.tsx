@@ -20,13 +20,21 @@ type SearchHistoryEntry = {
   timestamp: number;
 };
 
+type FavoriteTrip = {
+  id: string;
+  destination: { name: string; latitude: number; longitude: number };
+  origin: { name: string; latitude: number; longitude: number } | null;
+  routeIds: number[];
+  estimatedMinutes: number;
+};
+
 export default function ProfileScreen() {
   const { user } = useAuth();
   const router = useRouter();
 
   const [displayName, setDisplayName] = useState('');
   const [loading, setLoading] = useState(true);
-  const [starredRouteIds, setStarredRouteIds] = useState<number[]>([]);
+  const [favoriteTrips, setFavoriteTrips] = useState<FavoriteTrip[]>([]);
   const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
 
   useEffect(() => {
@@ -36,22 +44,24 @@ export default function ProfileScreen() {
 
   const loadData = async () => {
     try {
-      const [userDoc, rawStarred, rawHistory] = await Promise.all([
+      const [userDoc, rawFavs, rawHistory] = await Promise.all([
         getUserDoc(user!.uid),
-        AsyncStorage.getItem('starredRouteIds'),
+        AsyncStorage.getItem('favoriteTrips'),
         AsyncStorage.getItem('searchHistory'),
       ]);
       setDisplayName((userDoc as any)?.username || user?.displayName || 'User');
-      setStarredRouteIds(rawStarred ? JSON.parse(rawStarred) : []);
+      setFavoriteTrips(rawFavs ? JSON.parse(rawFavs) : []);
       setSearchHistory(rawHistory ? JSON.parse(rawHistory) : []);
     } catch {}
     setLoading(false);
   };
 
-  const handleUnstar = async (routeId: number) => {
-    const updated = starredRouteIds.filter((id) => id !== routeId);
-    setStarredRouteIds(updated);
-    await AsyncStorage.setItem('starredRouteIds', JSON.stringify(updated));
+  const handleUnfavorite = async (fav: FavoriteTrip) => {
+    const updated = favoriteTrips.filter(
+      (f) => !(f.id === fav.id && f.destination.name === fav.destination.name)
+    );
+    setFavoriteTrips(updated);
+    await AsyncStorage.setItem('favoriteTrips', JSON.stringify(updated));
   };
 
   const handleClearHistory = async () => {
@@ -113,9 +123,6 @@ export default function ProfileScreen() {
   }
 
   const initials = displayName.slice(0, 2).toUpperCase();
-  const starredRoutes = starredRouteIds
-    .map((id) => BUS_ROUTES.find((r) => r.id === id))
-    .filter(Boolean) as typeof BUS_ROUTES;
 
   return (
     <View style={styles.container}>
@@ -138,25 +145,35 @@ export default function ProfileScreen() {
           <Text style={styles.email}>{user?.email}</Text>
         </View>
 
-        {/* Favorited Routes */}
+        {/* Favorited Trips */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Favorited Routes</Text>
-          {starredRoutes.length > 0 ? (
-            starredRoutes.map((route) => (
-              <View key={route.id} style={styles.routeRow}>
-                <View style={[styles.routeDot, { backgroundColor: route.color }]} />
-                <Text style={styles.routeName}>{route.name}</Text>
-                <Pressable
-                  onPress={() => handleUnstar(route.id)}
-                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                >
-                  <Text style={styles.starActive}>★</Text>
-                </Pressable>
-              </View>
-            ))
+          <Text style={styles.sectionTitle}>Favorited Trips</Text>
+          {favoriteTrips.length > 0 ? (
+            favoriteTrips.map((fav) => {
+              const primaryRoute = BUS_ROUTES.find((r) => r.id === fav.routeIds[0]);
+              const secondRoute = fav.routeIds[1] ? BUS_ROUTES.find((r) => r.id === fav.routeIds[1]) : null;
+              const routeLabel = secondRoute
+                ? `${primaryRoute?.name} → ${secondRoute.name}`
+                : primaryRoute?.name ?? 'Unknown route';
+              return (
+                <View key={`${fav.id}-${fav.destination.name}`} style={styles.routeRow}>
+                  <View style={[styles.routeDot, { backgroundColor: primaryRoute?.color ?? '#999' }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.routeName} numberOfLines={1}>{fav.destination.name}</Text>
+                    <Text style={styles.routeSub} numberOfLines={1}>{routeLabel} · ~{fav.estimatedMinutes} min</Text>
+                  </View>
+                  <Pressable
+                    onPress={() => handleUnfavorite(fav)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Text style={styles.starActive}>★</Text>
+                  </Pressable>
+                </View>
+              );
+            })
           ) : (
             <Text style={styles.emptyText}>
-              No favorited routes yet. Tap ★ on a route option to save it here.
+              No favorited trips yet. Search a route and tap ★ to save it here.
             </Text>
           )}
         </View>
@@ -270,7 +287,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#f0f0f0',
   },
   routeDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
-  routeName: { flex: 1, fontSize: 15, fontWeight: '600', color: '#222' },
+  routeName: { fontSize: 15, fontWeight: '600', color: '#222' },
+  routeSub: { fontSize: 12, color: '#999', marginTop: 1 },
   starActive: { fontSize: 22, color: '#FDD023' },
 
   // Search history
